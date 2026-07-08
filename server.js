@@ -7,8 +7,8 @@ import { fileURLToPath } from "url";
 import "dotenv/config";
 
 import { transcribeAudio } from "./transcriptionService.js";
-import { structureTranscript, redoStructure, generateSolution, structuredDocToMarkdown } from "./llmProcessor.js";
-import { createWorkItem, uploadAttachment } from "./devopsIntegrator.js";
+import { structureTranscript, redoStructure, generateSolution, structuredDocToMarkdown, testGeminiConnection } from "./llmProcessor.js";
+import { createWorkItem, uploadAttachment, testDevOpsConnection } from "./devopsIntegrator.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -202,6 +202,109 @@ app.post("/api/approve", async (req, res) => {
   } catch (error) {
     console.error("[Server] Azure DevOps integration failed:", error);
     res.status(500).json({ error: error.message || "Failed to create Azure DevOps ticket." });
+  }
+});
+
+// Helper to update keys in .env file
+function updateEnvFile(updates) {
+  const envPath = path.join(__dirname, ".env");
+  let content = "";
+  if (fs.existsSync(envPath)) {
+    content = fs.readFileSync(envPath, "utf-8");
+  }
+
+  let lines = content.split(/\r?\n/);
+  for (const [key, value] of Object.entries(updates)) {
+    let found = false;
+    lines = lines.map((line) => {
+      const trimmed = line.trim();
+      if (trimmed.startsWith(`${key}=`) || trimmed.startsWith(`${key} `)) {
+        found = true;
+        // Keep comments or formatting if simple, otherwise replace line
+        return `${key}=${value}`;
+      }
+      return line;
+    });
+
+    if (!found) {
+      lines.push(`${key}=${value}`);
+    }
+  }
+
+  fs.writeFileSync(envPath, lines.join("\n"), "utf-8");
+}
+
+app.get("/api/settings", (req, res) => {
+  const geminiModel = process.env.GEMINI_MODEL || "gemini-1.5-flash";
+  const orgUrl = process.env.DEVOPS_ORG_URL || "";
+  const devopsProject = process.env.DEVOPS_PROJECT || "";
+
+  // Extract org name from dev.azure.com/orgName
+  let devopsOrg = "";
+  if (orgUrl) {
+    const parts = orgUrl.trim().replace(/\/$/, "").split("/");
+    devopsOrg = parts[parts.length - 1] || "";
+  }
+
+  res.json({
+    geminiModel,
+    devopsOrg,
+    devopsProject
+  });
+});
+
+app.post("/api/settings", async (req, res) => {
+  const { geminiModel, devopsOrg, devopsProject } = req.body;
+
+  if (!geminiModel) {
+    return res.status(400).json({ error: "Gemini Model is required." });
+  }
+  if (!devopsOrg) {
+    return res.status(400).json({ error: "DevOps Organization Name is required." });
+  }
+  if (!devopsProject) {
+    return res.status(400).json({ error: "DevOps Project Name is required." });
+  }
+
+  const devopsOrgUrl = `https://dev.azure.com/${devopsOrg.trim()}`;
+
+  try {
+    // 1. Connection testing
+    // Test Gemini connection first using existing API key (which is in process.env.GEMINI_API_KEY)
+    const geminiKey = process.env.GEMINI_API_KEY;
+    if (!geminiKey) {
+      throw new Error("GEMINI_API_KEY is not set in server .env. Please configure it there first.");
+    }
+    await testGeminiConnection(geminiKey, geminiModel);
+
+    // Test DevOps connection using existing PAT (in process.env.DEVOPS_PAT)
+    const devopsPat = process.env.DEVOPS_PAT;
+    if (!devopsPat) {
+      throw new Error("DEVOPS_PAT is not set in server .env. Please configure it there first.");
+    }
+    await testDevOpsConnection(devopsOrgUrl, devopsPat, devopsProject);
+
+    // 2. Save settings to .env file
+    updateEnvFile({
+      GEMINI_MODEL: geminiModel.trim(),
+      DEVOPS_ORG_URL: devopsOrgUrl,
+      DEVOPS_PROJECT: devopsProject.trim()
+    });
+
+    // 3. Update active environment variables in process.env so the server uses them immediately
+    process.env.GEMINI_MODEL = geminiModel.trim();
+    process.env.DEVOPS_ORG_URL = devopsOrgUrl;
+    process.env.DEVOPS_PROJECT = devopsProject.trim();
+
+    res.json({
+      success: true,
+      message: "Settings saved successfully and connections verified!"
+    });
+  } catch (error) {
+    console.error("[Server] Settings save/test failed:", error);
+    res.status(422).json({
+      error: error.message || "Failed to verify connection with the new settings."
+    });
   }
 });
 

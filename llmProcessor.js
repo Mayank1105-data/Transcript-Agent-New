@@ -376,3 +376,31 @@ export function structuredDocToMarkdown(doc, segments = []) {
 
   return md.trim();
 }
+
+/**
+ * Test Google Gemini connection and model availability.
+ * @param {string} apiKey - Gemini API Key.
+ * @param {string} model - Gemini model name.
+ */
+export async function testGeminiConnection(apiKey, model) {
+  const cleanKey = (apiKey || "").trim();
+  const cleanModel = (model || "").trim();
+
+  if (!cleanKey) throw new Error("GEMINI_API_KEY is required.");
+  if (!cleanModel) throw new Error("GEMINI_MODEL is required.");
+
+  try {
+    const client = new GoogleGenAI({ apiKey: cleanKey });
+    const response = await client.models.generateContent({
+      model: cleanModel,
+      contents: "Hello, connection test. Reply with 'OK'.",
+      config: { maxOutputTokens: 5 }
+    });
+    if (!response || !response.text) {
+      throw new Error("No response text returned from Gemini API.");
+    }
+    return true;
+  } catch (error) {
+    throw new Error(`Gemini connection test failed: ${error.message || error}`);
+  }
+}

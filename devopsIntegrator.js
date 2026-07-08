@@ -123,3 +123,36 @@ export async function createWorkItem(structuredText, attachmentUrl = null) {
     title: title
   };
 }
+
+/**
+ * Test credentials and access to Azure DevOps Project.
+ * @param {string} orgUrl - DevOps Organization URL.
+ * @param {string} pat - Personal Access Token.
+ * @param {string} project - DevOps Project name.
+ */
+export async function testDevOpsConnection(orgUrl, pat, project) {
+  const cleanOrg = orgUrl.trim().replace(/\/$/, "");
+  const cleanProject = project.trim();
+  const cleanPat = pat.trim();
+
+  if (!cleanOrg) throw new Error("Organization URL is required.");
+  if (!cleanPat) throw new Error("Personal Access Token (PAT) is required.");
+  if (!cleanProject) throw new Error("Project name is required.");
+
+  const authHeader = `Basic ${Buffer.from(`:${cleanPat}`).toString("base64")}`;
+  const url = `${cleanOrg}/_apis/projects/${encodeURIComponent(cleanProject)}?api-version=7.1`;
+
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      "Authorization": authHeader
+    }
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(`DevOps connection test failed: API returned status ${response.status} (${response.statusText})`);
+  }
+
+  return true;
+}

@@ -153,6 +153,27 @@ export default function App() {
     return localStorage.getItem("settings_devops_project") || "";
   });
 
+  const [settingsStatus, setSettingsStatus] = useState(null); // null, or { type: 'success'|'error', msg: '...' }
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
+
+  // Load settings from backend on mount
+  useEffect(() => {
+    const fetchSettings = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/settings`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.geminiModel) setGeminiModel(data.geminiModel);
+          if (data.devopsOrg) setDevopsOrg(data.devopsOrg);
+          if (data.devopsProject) setDevopsProject(data.devopsProject);
+        }
+      } catch (err) {
+        console.error("Failed to fetch settings from backend:", err);
+      }
+    };
+    fetchSettings();
+  }, []);
+
   // Error state
   const [errorMessage, setErrorMessage] = useState("");
 
@@ -567,12 +588,45 @@ export default function App() {
   };
 
   // Save settings overrides
-  const saveGlobalSettings = (e) => {
+  const saveGlobalSettings = async (e) => {
     e.preventDefault();
-    localStorage.setItem("settings_gemini_model", geminiModel);
-    localStorage.setItem("settings_devops_org", devopsOrg);
-    localStorage.setItem("settings_devops_project", devopsProject);
-    alert("Platform Settings saved. Org: " + devopsOrg + ", Project: " + devopsProject);
+    setSettingsStatus(null);
+    setIsSavingSettings(true);
+
+    try {
+      const res = await fetch(`${API_BASE}/settings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          geminiModel,
+          devopsOrg,
+          devopsProject
+        })
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Save settings and connection test failed.");
+      }
+
+      // Save to localStorage as backup/cache
+      localStorage.setItem("settings_gemini_model", geminiModel);
+      localStorage.setItem("settings_devops_org", devopsOrg);
+      localStorage.setItem("settings_devops_project", devopsProject);
+
+      setSettingsStatus({
+        type: "success",
+        msg: data.message || "Settings saved and connection test successful!"
+      });
+    } catch (err) {
+      console.error(err);
+      setSettingsStatus({
+        type: "error",
+        msg: err.message || "Failed to establish successful connection with settings."
+      });
+    } finally {
+      setIsSavingSettings(false);
+    }
   };
 
   const handleToggleSelect = (id) => {
@@ -1826,6 +1880,17 @@ export default function App() {
                 <p className="text-slate-400 text-xs mt-1">Configure active models and target DevOps workspace environments.</p>
               </div>
 
+              {settingsStatus && (
+                <div className={`mt-4 p-3 rounded-lg text-xs font-semibold border ${
+                  settingsStatus.type === "success"
+                    ? "bg-emerald-50 text-emerald-800 border-emerald-200"
+                    : "bg-rose-50 text-rose-800 border-rose-200"
+                }`}>
+                  {settingsStatus.type === "success" ? "✓ " : "✗ "}
+                  {settingsStatus.msg}
+                </div>
+              )}
+
               <form onSubmit={saveGlobalSettings} className="space-y-4 mt-6">
                 <div className="space-y-1.5">
                   <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider font-mono">
@@ -1871,9 +1936,20 @@ export default function App() {
                 <div className="pt-4 border-t border-slate-100 flex justify-end">
                   <button
                     type="submit"
-                    className="py-2.5 px-5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl text-xs shadow-md shadow-blue-100"
+                    disabled={isSavingSettings}
+                    className="py-2.5 px-5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl text-xs shadow-md shadow-blue-100 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
                   >
-                    Save Platform Settings
+                    {isSavingSettings ? (
+                      <>
+                        <svg className="animate-spin h-3.5 w-3.5 text-white" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                        </svg>
+                        Verifying Connection...
+                      </>
+                    ) : (
+                      "Save Platform Settings"
+                    )}
                   </button>
                 </div>
               </form>
