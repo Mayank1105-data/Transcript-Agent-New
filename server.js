@@ -8,7 +8,7 @@ import "dotenv/config";
 
 import { transcribeAudio } from "./transcriptionService.js";
 import { structureTranscript, redoStructure, generateSolution, structuredDocToMarkdown, testGeminiConnection } from "./llmProcessor.js";
-import { createWorkItem, uploadAttachment, testDevOpsConnection } from "./devopsIntegrator.js";
+import { createWorkItem, uploadAttachment, testDevOpsConnection, getWorkItemComments, postWorkItemComment, updateWorkItemComment } from "./devopsIntegrator.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -205,6 +205,255 @@ app.post("/api/approve", async (req, res) => {
   }
 });
 
+// ── Discussions / Comments Sync Endpoints ───────────────────────────
+const DISCUSSIONS_FILE = path.join(__dirname, "discussions.json");
+
+// Helper to read discussions database
+function readDiscussions() {
+  try {
+    if (!fs.existsSync(DISCUSSIONS_FILE)) {
+      return [];
+    }
+    const raw = fs.readFileSync(DISCUSSIONS_FILE, "utf-8");
+    return JSON.parse(raw);
+  } catch (error) {
+    console.error("[Server] Error reading discussions.json:", error);
+    return [];
+  }
+}
+
+// Helper to write discussions database
+function writeDiscussions(data) {
+  try {
+    fs.writeFileSync(DISCUSSIONS_FILE, JSON.stringify(data, null, 2), "utf-8");
+  } catch (error) {
+    console.error("[Server] Error writing discussions.json:", error);
+  }
+}
+
+/**
+ * Fetch and sync comments for a specific Work Item.
+ */
+app.get("/api/workitems/:id/comments", async (req, res) => {
+  const workItemId = req.params.id;
+
+  try {
+    // 1. Fetch live comments from DevOps
+    let devopsComments = [];
+    try {
+      devopsComments = await getWorkItemComments(workItemId);
+    } catch (apiErr) {
+      console.warn(`[Server] Warning: Failed to fetch live comments from DevOps for #${workItemId}:`, apiErr.message);
+    }
+
+    // 2. Read local discussions list
+    const localDiscussions = readDiscussions();
+
+    // 3. Merge: loop through devopsComments and insert/update local cache
+    let updated = false;
+    for (const dc of devopsComments) {
+      const localIndex = localDiscussions.findIndex(
+        (ld) => ld.workItemId == workItemId && ld.commentId == dc.id
+      );
+
+      const cleanText = (dc.text || "").replace(/<[^>]*>/g, "").trim();
+
+      if (localIndex === -1) {
+        localDiscussions.push({
+          id: `devops-${dc.id}`,
+          workItemId: parseInt(workItemId),
+          commentId: dc.id,
+          comment: cleanText || dc.text || "",
+          author: dc.createdBy?.displayName || "Azure DevOps",
+          source: "Azure DevOps",
+          createdDate: dc.createdDate || new Date().toISOString(),
+          syncStatus: "Synced",
+          lastUpdated: dc.createdDate || new Date().toISOString()
+        });
+        updated = true;
+      } else {
+        const existingComment = localDiscussions[localIndex];
+        if (existingComment.comment !== cleanText) {
+          existingComment.comment = cleanText;
+          existingComment.lastUpdated = dc.modifiedDate || new Date().toISOString();
+          updated = true;
+          console.log(`[Server] Updated comment #${dc.id} text to match live DevOps edit: "${cleanText}"`);
+        }
+      }
+    }
+
+    if (updated) {
+      writeDiscussions(localDiscussions);
+    }
+
+    // Filter comments for this work item and sort chronologically
+    const itemComments = localDiscussions
+      .filter((ld) => ld.workItemId == workItemId)
+      .sort((a, b) => new Date(a.createdDate) - new Date(b.createdDate));
+
+    res.json(itemComments);
+  } catch (error) {
+    console.error(`[Server] Error in GET comments for #${workItemId}:`, error);
+    res.status(500).json({ error: error.message || "Failed to retrieve comments." });
+  }
+});
+
+/**
+ * Add a new comment to a Work Item from the application UI and sync to DevOps.
+ */
+app.post("/api/workitems/:id/comments", async (req, res) => {
+  const workItemId = req.params.id;
+  const { comment, author } = req.body;
+
+  if (!comment || !comment.trim()) {
+    return res.status(400).json({ error: "Comment text cannot be empty." });
+  }
+
+  const localAuthor = author || "Application User";
+
+  try {
+    // 1. Post to Azure DevOps REST API
+    let devopsResult = null;
+    try {
+      devopsResult = await postWorkItemComment(workItemId, comment.trim());
+    } catch (apiErr) {
+      console.error(`[Server] Failed to sync comment to DevOps for #${workItemId}:`, apiErr);
+      throw new Error(`Azure DevOps sync failed: ${apiErr.message}`);
+    }
+
+    // 2. Read local discussions list
+    const localDiscussions = readDiscussions();
+
+    // 3. Save the successfully synced comment locally
+    const newComment = {
+      id: `local-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      workItemId: parseInt(workItemId),
+      commentId: devopsResult ? devopsResult.id : null,
+      comment: comment.trim(),
+      author: localAuthor,
+      source: "UI",
+      createdDate: devopsResult ? devopsResult.createdDate : new Date().toISOString(),
+      syncStatus: "Synced",
+      lastUpdated: new Date().toISOString()
+    };
+
+    localDiscussions.push(newComment);
+    writeDiscussions(localDiscussions);
+
+    res.json(newComment);
+  } catch (error) {
+    console.error(`[Server] Error in POST comment for #${workItemId}:`, error);
+    res.status(500).json({ error: error.message || "Failed to post comment." });
+  }
+});
+
+/**
+ * Update an existing comment for a Work Item from the application UI and sync to DevOps.
+ */
+app.patch("/api/workitems/:id/comments/:commentDbId", async (req, res) => {
+  const workItemId = req.params.id;
+  const commentDbId = req.params.commentDbId;
+  const { comment } = req.body;
+
+  if (!comment || !comment.trim()) {
+    return res.status(400).json({ error: "Comment text cannot be empty." });
+  }
+
+  try {
+    const localDiscussions = readDiscussions();
+    const commentIndex = localDiscussions.findIndex(
+      (ld) => ld.workItemId == workItemId && ld.id === commentDbId
+    );
+
+    if (commentIndex === -1) {
+      return res.status(404).json({ error: "Comment not found." });
+    }
+
+    const targetComment = localDiscussions[commentIndex];
+
+    // If it has a DevOps commentId, sync the update to Azure DevOps
+    if (targetComment.commentId) {
+      try {
+        await updateWorkItemComment(workItemId, targetComment.commentId, comment.trim());
+      } catch (apiErr) {
+        console.error(`[Server] Failed to sync comment update to DevOps for #${workItemId}:`, apiErr);
+        throw new Error(`Azure DevOps update failed: ${apiErr.message}`);
+      }
+    }
+
+    // Update locally
+    targetComment.comment = comment.trim();
+    targetComment.lastUpdated = new Date().toISOString();
+
+    writeDiscussions(localDiscussions);
+
+    res.json(targetComment);
+  } catch (error) {
+    console.error(`[Server] Error in PATCH comment update for #${workItemId}:`, error);
+    res.status(500).json({ error: error.message || "Failed to update comment." });
+  }
+});
+
+/**
+ * DevOps Webhook service hook endpoint.
+ */
+app.post("/api/webhook/devops", (req, res) => {
+  const payload = req.body;
+  
+  if (!payload || !payload.eventType) {
+    return res.status(400).json({ error: "Invalid webhook payload." });
+  }
+
+  console.log(`[Webhook] Received Azure DevOps event: ${payload.eventType}`);
+
+  if (payload.eventType === "workitem.commented" || payload.eventType === "workitem.updated") {
+    const resource = payload.resource;
+    const workItemId = resource.workItemId || resource.id;
+    const commentId = resource.id;
+    const commentText = resource.text || (resource.fields && resource.fields["System.History"]);
+
+    if (workItemId && commentId && commentText) {
+      const cleanText = commentText.replace(/<[^>]*>/g, "").trim();
+      const author = resource.createdByKey || (resource.fields && resource.fields["System.ChangedBy"]) || "Azure DevOps User";
+      const createdDate = resource.createdDate || new Date().toISOString();
+
+      const localDiscussions = readDiscussions();
+
+      const existingIndex = localDiscussions.findIndex(
+        (ld) => ld.workItemId == workItemId && ld.commentId == commentId
+      );
+
+      if (existingIndex === -1) {
+        localDiscussions.push({
+          id: `devops-${commentId}`,
+          workItemId: parseInt(workItemId),
+          commentId: commentId,
+          comment: cleanText,
+          author: author,
+          source: "Azure DevOps",
+          createdDate: createdDate,
+          syncStatus: "Synced",
+          lastUpdated: createdDate
+        });
+        writeDiscussions(localDiscussions);
+        console.log(`[Webhook] Synchronized new comment #${commentId} for Work Item #${workItemId}`);
+      } else {
+        const existingComment = localDiscussions[existingIndex];
+        if (existingComment.comment !== cleanText) {
+          existingComment.comment = cleanText;
+          existingComment.lastUpdated = resource.modifiedDate || new Date().toISOString();
+          writeDiscussions(localDiscussions);
+          console.log(`[Webhook] Updated comment #${commentId} for Work Item #${workItemId} to: "${cleanText}"`);
+        } else {
+          console.log(`[Webhook] Ignored duplicate comment #${commentId} for Work Item #${workItemId}`);
+        }
+      }
+    }
+  }
+
+  res.status(200).json({ success: true });
+});
+
 // Helper to update keys in .env file
 function updateEnvFile(updates) {
   const envPath = path.join(__dirname, ".env");
@@ -321,6 +570,34 @@ app.post("/api/settings", async (req, res) => {
     res.status(422).json({
       error: error.message || "Failed to verify connection with the new settings."
     });
+  }
+});
+
+/**
+ * Authentication login endpoint.
+ */
+app.post("/api/auth/login", (req, res) => {
+  const { username, password } = req.body;
+
+  if (!username || !username.trim()) {
+    return res.status(400).json({ error: "Username is required." });
+  }
+  if (!password) {
+    return res.status(400).json({ error: "Password is required." });
+  }
+
+  // Simple credential validation (allows any username with "admin123" or "password")
+  if (password === "admin123" || password === "password") {
+    res.json({
+      success: true,
+      user: {
+        username: username.trim(),
+        displayName: username.trim(),
+        role: "Administrator"
+      }
+    });
+  } else {
+    res.status(401).json({ error: "Invalid username or password. (Tip: Use 'admin123' as password)" });
   }
 });
 

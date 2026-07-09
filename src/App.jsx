@@ -181,13 +181,24 @@ export default function App() {
   const [selectedHistoryIds, setSelectedHistoryIds] = useState([]);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
+  // ── Discussion Sync States ──────────────────────────────────────────
+  const [activeCommentsWorkItemId, setActiveCommentsWorkItemId] = useState(null);
+  const [activeCommentsWorkItemTitle, setActiveCommentsWorkItemTitle] = useState("");
+  const [commentsList, setCommentsList] = useState([]);
+  const [newCommentText, setNewCommentText] = useState("");
+  const [isFetchingComments, setIsFetchingComments] = useState(false);
+  const [isPostingComment, setIsPostingComment] = useState(false);
+  const [commentsError, setCommentsError] = useState("");
+  const [editingCommentId, setEditingCommentId] = useState(null);
+  const [editingCommentText, setEditingCommentText] = useState("");
+
   // ── Refs ────────────────────────────────────────────────────────────
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const timerIntervalRef = useRef(null);
   const fileInputRef = useRef(null);
 
-  const API_BASE = "http://localhost:5000/api";
+  const API_BASE = "/api";
 
   // ── Recording Timer ─────────────────────────────────────────────────
   useEffect(() => {
@@ -632,6 +643,88 @@ export default function App() {
       });
     } finally {
       setIsSavingSettings(false);
+    }
+  };
+
+  const fetchComments = async (workItemId) => {
+    if (!workItemId) return;
+    setIsFetchingComments(true);
+    setCommentsError("");
+    try {
+      const res = await fetch(`${API_BASE}/workitems/${workItemId}/comments`);
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || "Failed to fetch comments.");
+      }
+      const data = await res.json();
+      setCommentsList(data);
+    } catch (err) {
+      console.error("[Client] Error fetching comments:", err);
+      setCommentsError(err.message || "Failed to retrieve discussion thread.");
+    } finally {
+      setIsFetchingComments(false);
+    }
+  };
+
+  const submitNewComment = async () => {
+    if (!activeCommentsWorkItemId || !newCommentText.trim()) return;
+    setIsPostingComment(true);
+    setCommentsError("");
+    try {
+      const res = await fetch(`${API_BASE}/workitems/${activeCommentsWorkItemId}/comments`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          comment: newCommentText.trim(),
+          author: "Application User"
+        })
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || "Failed to post comment.");
+      }
+
+      const newComment = await res.json();
+      setCommentsList((prev) => [...prev, newComment]);
+      setNewCommentText("");
+    } catch (err) {
+      console.error("[Client] Error posting comment:", err);
+      setCommentsError(err.message || "Failed to post comment.");
+    } finally {
+      setIsPostingComment(false);
+    }
+  };
+
+  const saveEditedComment = async (commentDbId) => {
+    if (!activeCommentsWorkItemId || !editingCommentText.trim()) return;
+    setIsPostingComment(true);
+    setCommentsError("");
+    try {
+      const res = await fetch(`${API_BASE}/workitems/${activeCommentsWorkItemId}/comments/${commentDbId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          comment: editingCommentText.trim()
+        })
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || "Failed to update comment.");
+      }
+
+      const updatedComment = await res.json();
+      setCommentsList((prev) =>
+        prev.map((c) => (c.id === commentDbId ? updatedComment : c))
+      );
+      setEditingCommentId(null);
+      setEditingCommentText("");
+    } catch (err) {
+      console.error("[Client] Error updating comment:", err);
+      setCommentsError(err.message || "Failed to update comment.");
+    } finally {
+      setIsPostingComment(false);
     }
   };
 
@@ -1672,7 +1765,7 @@ export default function App() {
                         <textarea
                           readOnly
                           value={selectedHistoryItem.rawTranscript}
-                          className="w-full flex-1 min-h-[250px] bg-slate-900 text-slate-200 font-mono text-xs p-3 rounded-lg border border-slate-850 focus:outline-none resize-none"
+                          className="w-full flex-1 min-h-[250px] bg-slate-900 text-slate-200 font-mono text-xs p-3 rounded-lg border border-slate-800 focus:outline-none resize-none"
                         />
                       )}
                     </div>
@@ -1871,6 +1964,21 @@ export default function App() {
                             View Tech Solution
                           </button>
                         )}
+
+                        <button
+                          onClick={() => {
+                            setActiveCommentsWorkItemId(item.devopsId);
+                            setActiveCommentsWorkItemTitle(item.devopsTitle || `Work Item #${item.devopsId}`);
+                            fetchComments(item.devopsId);
+                          }}
+                          className="w-full py-1.5 bg-slate-50 hover:bg-slate-100 text-slate-600 font-bold border border-slate-200 rounded-lg text-[10px] transition-all flex items-center justify-center gap-1"
+                        >
+                          <svg className="w-3.5 h-3.5 text-indigo-500" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 01.865-.501 48.172 48.172 0 003.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z" />
+                          </svg>
+                          Discussion / Sync Comments
+                        </button>
+
                         <a
                           href={item.devopsUrl}
                           target="_blank"
@@ -2113,6 +2221,217 @@ export default function App() {
                 >
                   Close
                 </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Discussion & Sync Comments Modal */}
+      {activeCommentsWorkItemId && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-white border border-slate-200 rounded-2xl w-full max-w-2xl max-h-[85vh] flex flex-col shadow-2xl overflow-hidden text-left">
+            {/* Header */}
+            <div className="p-5 border-b border-slate-150 flex justify-between items-center bg-slate-50/50">
+              <div>
+                <h3 className="text-sm font-bold text-slate-800 flex items-center gap-2">
+                  <svg className="w-5 h-5 text-indigo-600" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 01.865-.501 48.172 48.172 0 003.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z" />
+                  </svg>
+                  Discussion Thread — #{activeCommentsWorkItemId}
+                </h3>
+                <p className="text-[10px] text-slate-500 mt-1 line-clamp-1">
+                  <strong>Title:</strong> {activeCommentsWorkItemTitle}
+                </p>
+              </div>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => fetchComments(activeCommentsWorkItemId)}
+                  disabled={isFetchingComments}
+                  className="p-1.5 hover:bg-slate-100 rounded-lg text-slate-500 hover:text-slate-700 transition-all flex items-center gap-1 disabled:opacity-50 text-[10px] font-bold"
+                  title="Force Sync with DevOps"
+                >
+                  <svg className={`w-3.5 h-3.5 ${isFetchingComments ? "animate-spin text-indigo-500" : ""}`} fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+                  </svg>
+                  Sync Feed
+                </button>
+                <button
+                  onClick={() => {
+                    setActiveCommentsWorkItemId(null);
+                    setCommentsList([]);
+                    setCommentsError("");
+                    setNewCommentText("");
+                  }}
+                  className="text-slate-400 hover:text-slate-600 p-1"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            {/* Error Message */}
+            {commentsError && (
+              <div className="mx-5 mt-4 p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl text-[10px] font-semibold flex items-center gap-1.5">
+                <span>⚠️</span>
+                <span>{commentsError}</span>
+              </div>
+            )}
+
+            {/* Comment Thread */}
+            <div className="flex-1 overflow-y-auto p-5 space-y-4 bg-slate-50/50 min-h-[280px] max-h-[45vh]">
+              {isFetchingComments && commentsList.length === 0 ? (
+                <div className="h-full flex flex-col justify-center items-center py-12 text-slate-400 space-y-2">
+                  <div className="w-6 h-6 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin"></div>
+                  <span className="text-[10px] font-bold uppercase tracking-wider font-mono">Synchronizing Thread...</span>
+                </div>
+              ) : commentsList.length === 0 ? (
+                <div className="h-full flex flex-col justify-center items-center py-12 text-slate-400 text-center">
+                  <svg className="w-8 h-8 text-slate-300 mb-2" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M8.625 12a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H8.25m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H12m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 01-2.555-.337A5.972 5.972 0 015.41 18.97a5.969 5.969 0 01-.774-1.902A9.25 9.25 0 013 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25z" />
+                  </svg>
+                  <h4 className="text-[10px] font-bold text-slate-600 uppercase font-mono">No Comments Yet</h4>
+                  <p className="text-[9px] text-slate-400 mt-0.5">Start the conversation by posting below.</p>
+                </div>
+              ) : (
+                commentsList.map((c) => {
+                  const isUI = c.source === "UI";
+                  return (
+                    <div
+                      key={c.id}
+                      className={`flex flex-col max-w-[85%] ${isUI ? "ml-auto items-end" : "mr-auto items-start"}`}
+                    >
+                      <div className="flex items-center gap-1.5 mb-1 px-1">
+                        <span className="text-[9px] font-bold text-slate-600">{c.author}</span>
+                        <span className="text-[8px] text-slate-400">
+                          {new Date(c.createdDate).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                        <span
+                          className={`px-1.5 py-0.5 text-[7px] font-bold uppercase tracking-wide font-mono rounded-full ${
+                            isUI
+                              ? "bg-blue-50 text-blue-600 border border-blue-100"
+                              : "bg-amber-50 text-amber-600 border border-amber-100"
+                          }`}
+                        >
+                          {c.source}
+                        </span>
+                      </div>
+                      {editingCommentId === c.id ? (
+                        <div className="w-full min-w-[220px] flex flex-col gap-1.5 p-2 bg-white border border-slate-200 rounded-xl mt-1 shadow-sm">
+                          <input
+                            type="text"
+                            value={editingCommentText}
+                            onChange={(e) => setEditingCommentText(e.target.value)}
+                            className="w-full text-slate-800 text-[11px] p-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:bg-white"
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" && !e.shiftKey) {
+                                e.preventDefault();
+                                saveEditedComment(c.id);
+                              } else if (e.key === "Escape") {
+                                setEditingCommentId(null);
+                              }
+                            }}
+                          />
+                          <div className="flex gap-1.5 justify-end">
+                            <button
+                              onClick={() => setEditingCommentId(null)}
+                              className="px-2 py-1 text-[9px] font-bold text-slate-500 hover:text-slate-700 transition-colors"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              onClick={() => saveEditedComment(c.id)}
+                              disabled={!editingCommentText.trim() || isPostingComment}
+                              className="px-3 py-1 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-200 text-white text-[9px] font-bold rounded-lg transition-colors shadow-sm"
+                            >
+                              Save
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <div
+                            className={`p-3 pr-7 rounded-2xl text-[11px] leading-relaxed shadow-sm relative group ${
+                              isUI
+                                ? "bg-indigo-600 text-white rounded-tr-none"
+                                : "bg-white border border-slate-200 text-slate-800 rounded-tl-none"
+                            }`}
+                          >
+                            {c.comment}
+                            {/* Simple small pencil icon button in bottom right corner */}
+                            <button
+                              onClick={() => {
+                                setEditingCommentId(c.id);
+                                setEditingCommentText(c.comment);
+                              }}
+                              title="Edit Comment"
+                              className={`absolute bottom-1 right-1 opacity-0 group-hover:opacity-100 transition-all p-1 rounded-md ${
+                                isUI
+                                  ? "text-indigo-250 hover:text-white hover:bg-indigo-700/50"
+                                  : "text-slate-400 hover:text-indigo-600 hover:bg-slate-55"
+                              }`}
+                              style={{ zIndex: 10 }}
+                            >
+                              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L6.832 19.82a4.5 4.5 0 0 1-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 0 1 1.13-1.897L16.863 4.487Zm0 0L19.5 7.125" />
+                              </svg>
+                            </button>
+                          </div>
+                          {isUI && (
+                            <div className="flex items-center gap-1 mt-1 text-[8px] text-slate-400">
+                              <span>✓ Synced</span>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {/* Comment Input */}
+            <div className="p-4 border-t border-slate-150 bg-white">
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={newCommentText}
+                  onChange={(e) => setNewCommentText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      submitNewComment();
+                    }
+                  }}
+                  disabled={isPostingComment}
+                  placeholder="Type your comment to sync with DevOps..."
+                  className="flex-1 bg-slate-50 text-slate-800 text-xs p-3 rounded-xl border border-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:bg-white transition-all"
+                />
+                <button
+                  onClick={submitNewComment}
+                  disabled={isPostingComment || !newCommentText.trim()}
+                  className="px-4 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-200 disabled:text-slate-400 text-white font-bold rounded-xl text-xs transition-all shadow-md shadow-indigo-100 flex items-center justify-center gap-1"
+                >
+                  {isPostingComment ? (
+                    <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                  ) : (
+                    <>
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
+                      </svg>
+                      Send
+                    </>
+                  )}
+                </button>
+              </div>
+              <div className="mt-2 flex justify-between items-center px-1">
+                <span className="text-[8px] text-slate-400 font-mono">
+                  Press Enter to submit
+                </span>
+                <span className="text-[8px] text-slate-400 font-mono">
+                  Azure DevOps REST API V7.1
+                </span>
               </div>
             </div>
           </div>

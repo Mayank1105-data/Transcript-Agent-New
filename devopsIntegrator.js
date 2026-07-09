@@ -156,3 +156,104 @@ export async function testDevOpsConnection(orgUrl, pat, project) {
 
   return true;
 }
+
+/**
+ * Fetches comments for a specific DevOps Work Item.
+ * @param {number|string} workItemId - DevOps Work Item ID.
+ */
+export async function getWorkItemComments(workItemId) {
+  const orgUrl = (process.env.DEVOPS_ORG_URL || "").trim().replace(/\/$/, "");
+  const pat = (process.env.DEVOPS_PAT || "").trim();
+  const project = (process.env.DEVOPS_PROJECT || "").trim();
+
+  if (!orgUrl || !pat || !project) {
+    throw new Error("Azure DevOps credentials are not fully configured.");
+  }
+
+  const authHeader = `Basic ${Buffer.from(`:${pat}`).toString("base64")}`;
+  const url = `${orgUrl}/${encodeURIComponent(project)}/_apis/wit/workitems/${workItemId}/comments?api-version=7.1-preview.3`;
+
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      "Authorization": authHeader
+    }
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Failed to fetch DevOps comments: ${response.statusText} - ${errText}`);
+  }
+
+  const data = await response.json();
+  return data.comments || [];
+}
+
+/**
+ * Posts a comment to a DevOps Work Item.
+ * @param {number|string} workItemId - DevOps Work Item ID.
+ * @param {string} text - Comment text.
+ */
+export async function postWorkItemComment(workItemId, text) {
+  const orgUrl = (process.env.DEVOPS_ORG_URL || "").trim().replace(/\/$/, "");
+  const pat = (process.env.DEVOPS_PAT || "").trim();
+  const project = (process.env.DEVOPS_PROJECT || "").trim();
+
+  if (!orgUrl || !pat || !project) {
+    throw new Error("Azure DevOps credentials are not fully configured.");
+  }
+
+  const authHeader = `Basic ${Buffer.from(`:${pat}`).toString("base64")}`;
+  const url = `${orgUrl}/${encodeURIComponent(project)}/_apis/wit/workitems/${workItemId}/comments?api-version=7.1-preview.3`;
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Authorization": authHeader,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ text })
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Failed to post DevOps comment: ${response.statusText} - ${errText}`);
+  }
+
+  return await response.json();
+}
+
+/**
+ * Updates an existing comment on a DevOps Work Item.
+ * @param {number|string} workItemId - DevOps Work Item ID.
+ * @param {number|string} commentId - DevOps Comment ID.
+ * @param {string} text - Updated comment text.
+ */
+export async function updateWorkItemComment(workItemId, commentId, text) {
+  const orgUrl = (process.env.DEVOPS_ORG_URL || "").trim().replace(/\/$/, "");
+  const pat = (process.env.DEVOPS_PAT || "").trim();
+  const project = (process.env.DEVOPS_PROJECT || "").trim();
+
+  if (!orgUrl || !pat || !project) {
+    throw new Error("Azure DevOps credentials are not fully configured.");
+  }
+
+  const authHeader = `Basic ${Buffer.from(`:${pat}`).toString("base64")}`;
+  const url = `${orgUrl}/${encodeURIComponent(project)}/_apis/wit/workitems/${workItemId}/comments/${commentId}?api-version=7.1-preview.3`;
+
+  const response = await fetch(url, {
+    method: "PATCH",
+    headers: {
+      "Authorization": authHeader,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ text })
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Failed to update DevOps comment: ${response.statusText} - ${errText}`);
+  }
+
+  return await response.json();
+}
