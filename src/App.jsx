@@ -143,15 +143,12 @@ export default function App() {
   const [audioInputMode, setAudioInputMode] = useState("upload");
 
   // Local settings overrides
-  const [geminiModel, setGeminiModel] = useState(() => {
-    return localStorage.getItem("settings_gemini_model") || "gemini-1.5-flash";
-  });
-  const [devopsOrg, setDevopsOrg] = useState(() => {
-    return localStorage.getItem("settings_devops_org") || "";
-  });
-  const [devopsProject, setDevopsProject] = useState(() => {
-    return localStorage.getItem("settings_devops_project") || "";
-  });
+  const [geminiApiKey, setGeminiApiKey] = useState("");
+  const [geminiModel, setGeminiModel] = useState("gemini-1.5-flash");
+  const [devopsOrgUrl, setDevopsOrgUrl] = useState("");
+  const [devopsPat, setDevopsPat] = useState("");
+  const [devopsProject, setDevopsProject] = useState("");
+  const [devopsWorkItemType, setDevopsWorkItemType] = useState("Task");
 
   const [settingsStatus, setSettingsStatus] = useState(null); // null, or { type: 'success'|'error', msg: '...' }
   const [isSavingSettings, setIsSavingSettings] = useState(false);
@@ -163,9 +160,12 @@ export default function App() {
         const res = await fetch(`${API_BASE}/settings`);
         if (res.ok) {
           const data = await res.json();
+          if (data.geminiApiKey) setGeminiApiKey(data.geminiApiKey);
           if (data.geminiModel) setGeminiModel(data.geminiModel);
-          if (data.devopsOrg) setDevopsOrg(data.devopsOrg);
+          if (data.devopsOrgUrl) setDevopsOrgUrl(data.devopsOrgUrl);
+          if (data.devopsPat) setDevopsPat(data.devopsPat);
           if (data.devopsProject) setDevopsProject(data.devopsProject);
+          if (data.devopsWorkItemType) setDevopsWorkItemType(data.devopsWorkItemType);
         }
       } catch (err) {
         console.error("Failed to fetch settings from backend:", err);
@@ -598,9 +598,12 @@ export default function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          geminiApiKey,
           geminiModel,
-          devopsOrg,
-          devopsProject
+          devopsOrgUrl,
+          devopsPat,
+          devopsProject,
+          devopsWorkItemType
         })
       });
 
@@ -610,9 +613,12 @@ export default function App() {
       }
 
       // Save to localStorage as backup/cache
+      localStorage.setItem("settings_gemini_api_key", geminiApiKey);
       localStorage.setItem("settings_gemini_model", geminiModel);
-      localStorage.setItem("settings_devops_org", devopsOrg);
+      localStorage.setItem("settings_devops_org_url", devopsOrgUrl);
+      localStorage.setItem("settings_devops_pat", devopsPat);
       localStorage.setItem("settings_devops_project", devopsProject);
+      localStorage.setItem("settings_devops_work_item_type", devopsWorkItemType);
 
       setSettingsStatus({
         type: "success",
@@ -848,6 +854,18 @@ export default function App() {
 
               {/* Left Column: Input Ingestion Setup or Human Gate Review */}
               <div className="col-span-12 lg:col-span-6 bg-white border border-slate-200 rounded-2xl p-6 shadow-sm min-h-[500px] flex flex-col justify-between">
+
+                {(!geminiApiKey || !devopsPat || !devopsOrgUrl || !devopsProject) && (
+                  <div
+                    onClick={() => setActiveTab("settings")}
+                    className="mb-4 p-3 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl text-xs font-semibold cursor-pointer hover:bg-amber-100 transition-all flex items-center gap-2"
+                  >
+                    <span>⚠️</span>
+                    <span>
+                      <strong>Configuration Required:</strong> Gemini API Key, DevOps Organization URL, PAT, or Project is missing. Click here to configure.
+                    </span>
+                  </div>
+                )}
 
                 {pipelineState === "IDLE" && (
                   <div className="flex-1 flex flex-col justify-between space-y-6">
@@ -1450,13 +1468,13 @@ export default function App() {
                   {pipelineState === "IDLE" || pipelineState === "PREVIEW" ? (
                     <button
                       onClick={submitAudio}
-                      disabled={!audioBlob && !pastedText.trim()}
-                      className="w-full py-3 px-4 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-200 disabled:text-slate-400 text-white font-bold rounded-xl text-xs transition-all shadow-md shadow-blue-100 flex items-center justify-center gap-2"
+                      disabled={(!audioBlob && !pastedText.trim()) || (!geminiApiKey || !devopsPat || !devopsOrgUrl || !devopsProject)}
+                      className="w-full py-3 px-4 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-200 disabled:text-slate-400 text-white font-bold rounded-xl text-xs transition-all shadow-md shadow-blue-150 flex items-center justify-center gap-2"
                     >
                       <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" d="M15.59 14.37a6 6 0 01-5.84 7.38v-4.8m5.84-2.58a14.98 14.98 0 006.16-12.12A14.98 14.98 0 009.64 8.38l-1.32 1.32m8.59-1.32l-1.32 1.32M9.64 8.38A14.98 14.98 0 001.5 20.5a14.98 14.98 0 0012.12-8.16l1.32-1.32M9.64 8.38L8.32 9.7M12 2.25c-.292 0-.582.008-.87.024A14.98 14.98 0 0118 6.162c0-.29-.008-.58-.024-.87A2.25 2.25 0 0015.75 3H12zm-3 0c.292 0 .582.008.87.024A14.98 14.98 0 006 6.162c0-.29.008-.58.024-.87A2.25 2.25 0 018.25 3H9z" />
                       </svg>
-                      Start Automation Pipeline
+                      {(!geminiApiKey || !devopsPat || !devopsOrgUrl || !devopsProject) ? "Configuration Required" : "Start Automation Pipeline"}
                     </button>
                   ) : (
                     <div className="text-center text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono py-3">
@@ -1892,6 +1910,24 @@ export default function App() {
               )}
 
               <form onSubmit={saveGlobalSettings} className="space-y-4 mt-6">
+                {/* --- Google Gemini Section --- */}
+                <div className="pt-2 pb-1 border-b border-slate-100">
+                  <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider font-mono">Google Gemini API Configuration</h3>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider font-mono">
+                    Google Gemini API Key
+                  </label>
+                  <input
+                    type="password"
+                    value={geminiApiKey}
+                    onChange={(e) => setGeminiApiKey(e.target.value)}
+                    placeholder="Enter Google Gemini API Key (GEMINI_API_KEY)..."
+                    className="w-full bg-slate-50 text-slate-700 text-xs p-3 rounded-lg border border-slate-200 focus:outline-none focus:ring-1"
+                  />
+                </div>
+
                 <div className="space-y-1.5">
                   <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider font-mono">
                     Google Gemini Model Override
@@ -1907,15 +1943,33 @@ export default function App() {
                   </select>
                 </div>
 
+                {/* --- Azure DevOps Section --- */}
+                <div className="pt-4 pb-1 border-b border-slate-100">
+                  <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider font-mono">Azure DevOps Integration Settings</h3>
+                </div>
+
                 <div className="space-y-1.5">
                   <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider font-mono">
-                    Target DevOps Organization Name
+                    Target DevOps Organization URL
                   </label>
                   <input
                     type="text"
-                    value={devopsOrg}
-                    onChange={(e) => setDevopsOrg(e.target.value)}
-                    placeholder="Enter Azure DevOps Organization Name..."
+                    value={devopsOrgUrl}
+                    onChange={(e) => setDevopsOrgUrl(e.target.value)}
+                    placeholder="Enter Azure DevOps Organization URL (e.g. https://dev.azure.com/org)..."
+                    className="w-full bg-slate-50 text-slate-700 text-xs p-3 rounded-lg border border-slate-200 focus:outline-none focus:ring-1"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider font-mono">
+                    Target DevOps PAT (Personal Access Token)
+                  </label>
+                  <input
+                    type="password"
+                    value={devopsPat}
+                    onChange={(e) => setDevopsPat(e.target.value)}
+                    placeholder="Enter Azure DevOps Personal Access Token (PAT)..."
                     className="w-full bg-slate-50 text-slate-700 text-xs p-3 rounded-lg border border-slate-200 focus:outline-none focus:ring-1"
                   />
                 </div>
@@ -1931,6 +1985,24 @@ export default function App() {
                     placeholder="Enter Azure DevOps Project Name..."
                     className="w-full bg-slate-50 text-slate-700 text-xs p-3 rounded-lg border border-slate-200 focus:outline-none focus:ring-1"
                   />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider font-mono">
+                    Target DevOps Work Item Type
+                  </label>
+                  <select
+                    value={devopsWorkItemType}
+                    onChange={(e) => setDevopsWorkItemType(e.target.value)}
+                    className="w-full bg-slate-50 text-slate-700 text-xs p-3 rounded-lg border border-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-semibold"
+                  >
+                    <option value="Task">Task</option>
+                    <option value="User Story">User Story</option>
+                    <option value="Bug">Bug</option>
+                    <option value="Epic">Epic</option>
+                    <option value="Feature">Feature</option>
+                    <option value="Issue">Issue</option>
+                  </select>
                 </div>
 
                 <div className="pt-4 border-t border-slate-100 flex justify-end">

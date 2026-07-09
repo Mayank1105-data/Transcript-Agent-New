@@ -12,13 +12,16 @@ function getGeminiModel() {
   return model;
 }
 
+let currentApiKey = null;
+
 function getAiClient() {
-  if (!aiClient) {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      throw new Error("GEMINI_API_KEY is not set in environment variables. Please add it to your .env file.");
-    }
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error("GEMINI_API_KEY is not set in environment variables. Please add it to your .env file.");
+  }
+  if (!aiClient || currentApiKey !== apiKey) {
     aiClient = new GoogleGenAI({ apiKey });
+    currentApiKey = apiKey;
   }
   return aiClient;
 }

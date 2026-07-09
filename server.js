@@ -99,7 +99,7 @@ app.post("/api/redo", async (req, res) => {
   console.log(`[Server] Redo requested. Feedback: "${feedback || "none"}"`);
 
   try {
-    const revisedTextObj = await redoStructure(current_text, feedback, segments || [], prompt_override);
+    const revisedTextObj = await redoStructure(current_text, segments || [], feedback, prompt_override);
     const revisedText = structuredDocToMarkdown(revisedTextObj, segments || []);
     res.json({ structured_text: revisedText });
   } catch (error) {
@@ -235,66 +235,82 @@ function updateEnvFile(updates) {
 }
 
 app.get("/api/settings", (req, res) => {
+  const geminiApiKey = process.env.GEMINI_API_KEY || "";
   const geminiModel = process.env.GEMINI_MODEL || "gemini-1.5-flash";
-  const orgUrl = process.env.DEVOPS_ORG_URL || "";
+  const devopsOrgUrl = process.env.DEVOPS_ORG_URL || "";
+  const devopsPat = process.env.DEVOPS_PAT || "";
   const devopsProject = process.env.DEVOPS_PROJECT || "";
-
-  // Extract org name from dev.azure.com/orgName
-  let devopsOrg = "";
-  if (orgUrl) {
-    const parts = orgUrl.trim().replace(/\/$/, "").split("/");
-    devopsOrg = parts[parts.length - 1] || "";
-  }
+  const devopsWorkItemType = process.env.DEVOPS_WORK_ITEM_TYPE || "Task";
 
   res.json({
+    geminiApiKey,
     geminiModel,
-    devopsOrg,
-    devopsProject
+    devopsOrgUrl,
+    devopsPat,
+    devopsProject,
+    devopsWorkItemType
   });
 });
 
 app.post("/api/settings", async (req, res) => {
-  const { geminiModel, devopsOrg, devopsProject } = req.body;
+  const {
+    geminiApiKey,
+    geminiModel,
+    devopsOrgUrl,
+    devopsPat,
+    devopsProject,
+    devopsWorkItemType
+  } = req.body;
 
+  if (!geminiApiKey) {
+    return res.status(400).json({ error: "Gemini API Key is required." });
+  }
   if (!geminiModel) {
     return res.status(400).json({ error: "Gemini Model is required." });
   }
-  if (!devopsOrg) {
-    return res.status(400).json({ error: "DevOps Organization Name is required." });
+  if (!devopsOrgUrl) {
+    return res.status(400).json({ error: "DevOps Organization URL is required." });
+  }
+  if (!devopsPat) {
+    return res.status(400).json({ error: "DevOps Personal Access Token (PAT) is required." });
   }
   if (!devopsProject) {
     return res.status(400).json({ error: "DevOps Project Name is required." });
   }
+  if (!devopsWorkItemType) {
+    return res.status(400).json({ error: "DevOps Work Item Type is required." });
+  }
 
-  const devopsOrgUrl = `https://dev.azure.com/${devopsOrg.trim()}`;
+  let targetOrgUrl = devopsOrgUrl.trim();
+  if (!targetOrgUrl.startsWith("http://") && !targetOrgUrl.startsWith("https://")) {
+    targetOrgUrl = `https://${targetOrgUrl}`;
+  }
 
   try {
     // 1. Connection testing
-    // Test Gemini connection first using existing API key (which is in process.env.GEMINI_API_KEY)
-    const geminiKey = process.env.GEMINI_API_KEY;
-    if (!geminiKey) {
-      throw new Error("GEMINI_API_KEY is not set in server .env. Please configure it there first.");
-    }
-    await testGeminiConnection(geminiKey, geminiModel);
+    // Test Gemini connection using the provided API key and model
+    await testGeminiConnection(geminiApiKey, geminiModel);
 
-    // Test DevOps connection using existing PAT (in process.env.DEVOPS_PAT)
-    const devopsPat = process.env.DEVOPS_PAT;
-    if (!devopsPat) {
-      throw new Error("DEVOPS_PAT is not set in server .env. Please configure it there first.");
-    }
-    await testDevOpsConnection(devopsOrgUrl, devopsPat, devopsProject);
+    // Test DevOps connection using the provided PAT, Org URL and Project name
+    await testDevOpsConnection(targetOrgUrl, devopsPat, devopsProject);
 
     // 2. Save settings to .env file
     updateEnvFile({
+      GEMINI_API_KEY: geminiApiKey.trim(),
       GEMINI_MODEL: geminiModel.trim(),
-      DEVOPS_ORG_URL: devopsOrgUrl,
-      DEVOPS_PROJECT: devopsProject.trim()
+      DEVOPS_ORG_URL: targetOrgUrl,
+      DEVOPS_PAT: devopsPat.trim(),
+      DEVOPS_PROJECT: devopsProject.trim(),
+      DEVOPS_WORK_ITEM_TYPE: devopsWorkItemType.trim()
     });
 
     // 3. Update active environment variables in process.env so the server uses them immediately
+    process.env.GEMINI_API_KEY = geminiApiKey.trim();
     process.env.GEMINI_MODEL = geminiModel.trim();
-    process.env.DEVOPS_ORG_URL = devopsOrgUrl;
+    process.env.DEVOPS_ORG_URL = targetOrgUrl;
+    process.env.DEVOPS_PAT = devopsPat.trim();
     process.env.DEVOPS_PROJECT = devopsProject.trim();
+    process.env.DEVOPS_WORK_ITEM_TYPE = devopsWorkItemType.trim();
 
     res.json({
       success: true,

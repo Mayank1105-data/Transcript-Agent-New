@@ -10,13 +10,16 @@ function getGeminiModel() {
   return model;
 }
 
+let currentApiKey = null;
+
 function getAiClient() {
-  if (!aiClient) {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      throw new Error("GEMINI_API_KEY is not set in environment variables. Please add it to your .env file.");
-    }
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error("GEMINI_API_KEY is not set in environment variables. Please add it to your .env file.");
+  }
+  if (!aiClient || currentApiKey !== apiKey) {
     aiClient = new GoogleGenAI({ apiKey });
+    currentApiKey = apiKey;
   }
   return aiClient;
 }
@@ -401,6 +404,23 @@ export async function testGeminiConnection(apiKey, model) {
     }
     return true;
   } catch (error) {
-    throw new Error(`Gemini connection test failed: ${error.message || error}`);
+    let errMsg = error.message || String(error);
+    if (errMsg.includes('{"error":')) {
+      try {
+        const startIdx = errMsg.indexOf('{"error":');
+        const jsonStr = errMsg.substring(startIdx);
+        const parsed = JSON.parse(jsonStr);
+        if (parsed.error && parsed.error.message) {
+          if (parsed.error.code === 429 || parsed.error.status === "RESOURCE_EXHAUSTED") {
+            errMsg = `Quota Exceeded (429): You exceeded your current Gemini API quota. Please check your plan/billing details or try again later.`;
+          } else {
+            errMsg = `API Error (${parsed.error.code}): ${parsed.error.message}`;
+          }
+        }
+      } catch (e) {
+        // use original fallback
+      }
+    }
+    throw new Error(`Gemini connection test failed: ${errMsg}`);
   }
 }
