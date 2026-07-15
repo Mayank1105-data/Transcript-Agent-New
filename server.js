@@ -8,7 +8,7 @@ import "dotenv/config";
 
 import { transcribeAudio } from "./transcriptionService.js";
 import { structureTranscript, redoStructure, generateSolution, structuredDocToMarkdown, testGeminiConnection } from "./llmProcessor.js";
-import { createWorkItem, uploadAttachment, testDevOpsConnection, getWorkItemComments, postWorkItemComment, updateWorkItemComment } from "./devopsIntegrator.js";
+import { createWorkItem, uploadAttachment, testDevOpsConnection, getWorkItemComments, postWorkItemComment, updateWorkItemComment, getWorkItem } from "./devopsIntegrator.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,6 +18,41 @@ const PORT = process.env.PORT || 5000;
 
 app.use(cors());
 app.use(express.json());
+
+// SSE Connected Clients Set
+const sseClients = new Set();
+
+// SSE Events stream endpoint
+app.get("/api/events", (req, res) => {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Allow-Methods": "GET"
+  });
+  res.flushHeaders();
+  res.write("retry: 3000\n\n");
+  sseClients.add(res);
+
+  // Send a heartbeat event to confirm connection
+  res.write(`event: connected\ndata: ${JSON.stringify({ status: "connected" })}\n\n`);
+
+  req.on("close", () => {
+    sseClients.delete(res);
+  });
+});
+
+// Helper to broadcast events to all connected clients
+function broadcastSSE(eventName, payload) {
+  const data = `event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`;
+  for (const client of sseClients) {
+    client.write(data);
+  }
+}
+
 
 // Ensure uploads folder exists
 const uploadDir = path.join(__dirname, "uploads");
@@ -394,29 +429,86 @@ app.patch("/api/workitems/:id/comments/:commentDbId", async (req, res) => {
   }
 });
 
+// Helper to log webhook events to a local file for diagnostic tracing
+function logWebhook(message, payload = null) {
+  const timestamp = new Date().toISOString();
+  let logText = `[${timestamp}] ${message}\n`;
+  if (payload) {
+    logText += `Payload: ${JSON.stringify(payload, null, 2)}\n`;
+  }
+  logText += `-------------------------------------------\n`;
+  try {
+    fs.appendFileSync(path.join(__dirname, "webhook.log"), logText);
+  } catch (err) {
+    console.error("Failed to write to webhook.log:", err);
+  }
+}
+
 /**
  * DevOps Webhook service hook endpoint.
  */
-app.post("/api/webhook/devops", (req, res) => {
+app.post("/api/webhook/devops", async (req, res) => {
   const payload = req.body;
   
   if (!payload || !payload.eventType) {
+    logWebhook("Received invalid webhook payload (missing eventType or body)");
     return res.status(400).json({ error: "Invalid webhook payload." });
   }
 
+  logWebhook(`Received Azure DevOps event: ${payload.eventType}`, payload);
   console.log(`[Webhook] Received Azure DevOps event: ${payload.eventType}`);
 
-  if (payload.eventType === "workitem.commented" || payload.eventType === "workitem.updated") {
+  // Ack immediately to prevent Azure DevOps from timing out / retrying
+  res.status(200).json({ success: true });
+
+  try {
     const resource = payload.resource;
     const workItemId = resource.workItemId || resource.id;
-    const commentId = resource.id;
-    const commentText = resource.text || (resource.fields && resource.fields["System.History"]);
 
-    if (workItemId && commentId && commentText) {
+    if (!workItemId) {
+      console.warn("[Webhook] Webhook payload missing workItemId.");
+      return;
+    }
+
+    // 1. Process Comment Updates
+    let commentId = null;
+    let commentText = null;
+    let author = "Azure DevOps User";
+    let createdDate = new Date().toISOString();
+    let isComment = false;
+
+    if (payload.eventType === "workitem.commented") {
+      isComment = true;
+      if (resource.comment) {
+        commentId = resource.comment.id;
+        commentText = resource.comment.text;
+        author = resource.comment.createdBy?.displayName || "Azure DevOps User";
+        createdDate = resource.comment.createdDate || createdDate;
+      } else if (resource.commentVersionRef && resource.fields && resource.fields["System.History"]) {
+        commentId = resource.commentVersionRef.commentId;
+        commentText = resource.fields["System.History"];
+        if (resource.fields["System.ChangedBy"]) {
+          const changedBy = resource.fields["System.ChangedBy"];
+          author = changedBy.includes("<") ? changedBy.split("<")[0].trim() : changedBy;
+        }
+        createdDate = resource.fields["System.ChangedDate"] || createdDate;
+      } else {
+        commentId = resource.id;
+        commentText = resource.text;
+      }
+    } else if (payload.eventType === "workitem.updated" && resource.fields && resource.fields["System.History"]) {
+      isComment = true;
+      commentText = resource.fields["System.History"];
+      commentId = resource.rev ? `update-${resource.rev}` : `update-${Date.now()}`;
+      if (resource.fields["System.ChangedBy"]) {
+        const changedBy = resource.fields["System.ChangedBy"];
+        author = changedBy.includes("<") ? changedBy.split("<")[0].trim() : changedBy;
+      }
+      createdDate = resource.fields["System.ChangedDate"] || createdDate;
+    }
+
+    if (isComment && commentId && commentText) {
       const cleanText = commentText.replace(/<[^>]*>/g, "").trim();
-      const author = resource.createdByKey || (resource.fields && resource.fields["System.ChangedBy"]) || "Azure DevOps User";
-      const createdDate = resource.createdDate || new Date().toISOString();
-
       const localDiscussions = readDiscussions();
 
       const existingIndex = localDiscussions.findIndex(
@@ -424,7 +516,7 @@ app.post("/api/webhook/devops", (req, res) => {
       );
 
       if (existingIndex === -1) {
-        localDiscussions.push({
+        const newComment = {
           id: `devops-${commentId}`,
           workItemId: parseInt(workItemId),
           commentId: commentId,
@@ -434,9 +526,13 @@ app.post("/api/webhook/devops", (req, res) => {
           createdDate: createdDate,
           syncStatus: "Synced",
           lastUpdated: createdDate
-        });
+        };
+        localDiscussions.push(newComment);
         writeDiscussions(localDiscussions);
         console.log(`[Webhook] Synchronized new comment #${commentId} for Work Item #${workItemId}`);
+        
+        // Push live comment to frontend
+        broadcastSSE("new-comment", newComment);
       } else {
         const existingComment = localDiscussions[existingIndex];
         if (existingComment.comment !== cleanText) {
@@ -444,14 +540,33 @@ app.post("/api/webhook/devops", (req, res) => {
           existingComment.lastUpdated = resource.modifiedDate || new Date().toISOString();
           writeDiscussions(localDiscussions);
           console.log(`[Webhook] Updated comment #${commentId} for Work Item #${workItemId} to: "${cleanText}"`);
-        } else {
-          console.log(`[Webhook] Ignored duplicate comment #${commentId} for Work Item #${workItemId}`);
+          
+          // Push updated comment to frontend
+          broadcastSSE("updated-comment", existingComment);
         }
       }
     }
-  }
 
-  res.status(200).json({ success: true });
+    // 2. Process Work Item Detail Updates (title, description, status)
+    if (payload.eventType === "workitem.updated" || payload.eventType === "workitem.created") {
+      console.log(`[Webhook] Fetching full details for Work Item #${workItemId} to broadcast field changes`);
+      
+      const workItem = await getWorkItem(workItemId);
+      
+      const fields = workItem.fields || {};
+      const updatedFields = {
+        id: parseInt(workItemId),
+        title: fields["System.Title"] || "",
+        descriptionHtml: fields["System.Description"] || "",
+        state: fields["System.State"] || ""
+      };
+
+      console.log(`[Webhook] Broadcasting workitem-updated event for #${workItemId}:`, updatedFields);
+      broadcastSSE("workitem-updated", updatedFields);
+    }
+  } catch (error) {
+    console.error("[Webhook] Error processing webhook:", error);
+  }
 });
 
 // Helper to update keys in .env file

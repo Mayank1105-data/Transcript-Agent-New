@@ -198,7 +198,101 @@ export default function App() {
   const timerIntervalRef = useRef(null);
   const fileInputRef = useRef(null);
 
+  const activeCommentsWorkItemIdRef = useRef(null);
+  const selectedHistoryItemRef = useRef(null);
+
+  useEffect(() => {
+    activeCommentsWorkItemIdRef.current = activeCommentsWorkItemId;
+  }, [activeCommentsWorkItemId]);
+
+  useEffect(() => {
+    selectedHistoryItemRef.current = selectedHistoryItem;
+  }, [selectedHistoryItem]);
+
   const API_BASE = "/api";
+
+  // ── Real-Time Webhook Update SSE Listener ───────────────────────────
+  useEffect(() => {
+    // Connect directly to the backend port on localhost to bypass Vite proxy buffering for SSE streams
+    const sseUrl = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
+      ? "http://localhost:5000/api/events"
+      : `${API_BASE}/events`;
+
+    const es = new EventSource(sseUrl);
+
+    es.addEventListener("new-comment", (e) => {
+      try {
+        const comment = JSON.parse(e.data);
+        console.log("[SSE] New comment received:", comment);
+        
+        if (activeCommentsWorkItemIdRef.current && String(comment.workItemId) === String(activeCommentsWorkItemIdRef.current)) {
+          setCommentsList((prev) => {
+            if (prev.some((c) => c.id === comment.id)) return prev;
+            return [...prev, comment];
+          });
+        }
+      } catch (err) {
+        console.error("[SSE] Error parsing new-comment event:", err);
+      }
+    });
+
+    es.addEventListener("updated-comment", (e) => {
+      try {
+        const comment = JSON.parse(e.data);
+        console.log("[SSE] Updated comment received:", comment);
+        
+        if (activeCommentsWorkItemIdRef.current && String(comment.workItemId) === String(activeCommentsWorkItemIdRef.current)) {
+          setCommentsList((prev) => prev.map((c) => (c.id === comment.id ? comment : c)));
+        }
+      } catch (err) {
+        console.error("[SSE] Error parsing updated-comment event:", err);
+      }
+    });
+
+    es.addEventListener("workitem-updated", (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        console.log("[SSE] Work item update received:", data);
+
+        // Update the item in project history list
+        setProjectHistory((prev) => {
+          const updated = prev.map((item) =>
+            String(item.devopsId) === String(data.id)
+              ? {
+                  ...item,
+                  devopsTitle: data.title ?? item.devopsTitle,
+                  structuredPRD: data.descriptionHtml || item.structuredPRD,
+                  status: data.state ?? item.status,
+                  isHtml: true // Flag to skip markdown parsing
+                }
+              : item
+          );
+          localStorage.setItem("project_history", JSON.stringify(updated));
+          return updated;
+        });
+
+        // Update selected detail view if we are looking at this work item
+        if (selectedHistoryItemRef.current && String(selectedHistoryItemRef.current.devopsId) === String(data.id)) {
+          setSelectedHistoryItem((prev) => prev ? {
+            ...prev,
+            devopsTitle: data.title ?? prev.devopsTitle,
+            structuredPRD: data.descriptionHtml || prev.structuredPRD,
+            isHtml: true
+          } : null);
+        }
+      } catch (err) {
+        console.error("[SSE] Error parsing workitem-updated event:", err);
+      }
+    });
+
+    es.onerror = (err) => {
+      console.warn("[SSE] Connection dropped, reconnecting...", err);
+    };
+
+    return () => {
+      es.close();
+    };
+  }, []);
 
   // ── Recording Timer ─────────────────────────────────────────────────
   useEffect(() => {
@@ -1777,7 +1871,11 @@ export default function App() {
                       </span>
                       <div
                         className="prose prose-slate prose-xs text-slate-700 max-w-none text-left leading-relaxed prose-headings:text-slate-900 prose-headings:font-bold"
-                        dangerouslySetInnerHTML={{ __html: marked.parse(formatCitationsForPreview(selectedHistoryItem.structuredPRD || "*No PRD available.*")) }}
+                        dangerouslySetInnerHTML={{
+                          __html: selectedHistoryItem.isHtml
+                            ? selectedHistoryItem.structuredPRD
+                            : marked.parse(formatCitationsForPreview(selectedHistoryItem.structuredPRD || "*No PRD available.*"))
+                        }}
                         onClick={handleContainerClick}
                       />
                     </div>

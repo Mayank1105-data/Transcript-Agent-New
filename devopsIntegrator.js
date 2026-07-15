@@ -257,3 +257,33 @@ export async function updateWorkItemComment(workItemId, commentId, text) {
 
   return await response.json();
 }
+
+/**
+ * Fetches a work item's current fields (title, description, state) from Azure DevOps.
+ * @param {number|string} id - DevOps Work Item ID.
+ */
+export async function getWorkItem(id) {
+  const orgUrl = (process.env.DEVOPS_ORG_URL || "").trim().replace(/\/$/, "");
+  const pat = (process.env.DEVOPS_PAT || "").trim();
+  const project = (process.env.DEVOPS_PROJECT || "").trim();
+
+  if (!orgUrl || !pat || !project) {
+    throw new Error("Azure DevOps credentials are not fully configured.");
+  }
+
+  const authHeader = `Basic ${Buffer.from(`:${pat}`).toString("base64")}`;
+  const url = `${orgUrl}/${encodeURIComponent(project)}/_apis/wit/workitems/${id}?api-version=7.1`;
+
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      "Authorization": authHeader
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch work item ${id}: ${response.status}`);
+  }
+
+  return await response.json();
+}
