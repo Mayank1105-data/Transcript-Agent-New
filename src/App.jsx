@@ -111,6 +111,16 @@ export default function App() {
   const [warningMessage, setWarningMessage] = useState("");
   const [approveLoadingMsg, setApproveLoadingMsg] = useState("");
 
+  // ── Requirement Management States ───────────────────────────────────
+  const [showParentSelector, setShowParentSelector] = useState(false);
+  const [parentRequirements, setParentRequirements] = useState([]);
+  const [selectedParentId, setSelectedParentId] = useState(null);
+  const [selectedParentTitle, setSelectedParentTitle] = useState("");
+  const [selectedParentDescription, setSelectedParentDescription] = useState("");
+  const [isLoadingParents, setIsLoadingParents] = useState(false);
+  const [parentSearchQuery, setParentSearchQuery] = useState("");
+  const [changesSummary, setChangesSummary] = useState(null);
+
   // Sidebar navigation state
   const [activeTab, setActiveTab] = useState("stakeholder-input"); // stakeholder-input, agent-studio, workflow-library, devops-sync, settings
 
@@ -149,6 +159,7 @@ export default function App() {
   const [devopsPat, setDevopsPat] = useState("");
   const [devopsProject, setDevopsProject] = useState("");
   const [devopsWorkItemType, setDevopsWorkItemType] = useState("Task");
+  const [devopsParentWorkItemType, setDevopsParentWorkItemType] = useState("Epic");
 
   const [settingsStatus, setSettingsStatus] = useState(null); // null, or { type: 'success'|'error', msg: '...' }
   const [isSavingSettings, setIsSavingSettings] = useState(false);
@@ -166,6 +177,7 @@ export default function App() {
           if (data.devopsPat) setDevopsPat(data.devopsPat);
           if (data.devopsProject) setDevopsProject(data.devopsProject);
           if (data.devopsWorkItemType) setDevopsWorkItemType(data.devopsWorkItemType);
+          if (data.devopsParentWorkItemType) setDevopsParentWorkItemType(data.devopsParentWorkItemType);
         }
       } catch (err) {
         console.error("Failed to fetch settings from backend:", err);
@@ -294,6 +306,11 @@ export default function App() {
     };
   }, []);
 
+  // Fetch parent requirements (Epics) immediately on app initialization
+  useEffect(() => {
+    fetchParentRequirements();
+  }, []);
+
   // ── Recording Timer ─────────────────────────────────────────────────
   useEffect(() => {
     if (isRecording) {
@@ -343,6 +360,7 @@ export default function App() {
         // Stop stream tracks
         stream.getTracks().forEach((track) => track.stop());
         setPipelineState("PREVIEW");
+        fetchParentRequirements();
       };
 
       mediaRecorder.start(250);
@@ -401,6 +419,7 @@ export default function App() {
     setAudioUrl(url);
     setAudioFileName(file.name);
     setPipelineState("PREVIEW");
+    fetchParentRequirements();
   };
 
   const triggerFileInput = () => {
@@ -584,44 +603,59 @@ export default function App() {
     }
   };
 
-  // ── Approve & Ship Logic ────────────────────────────────────────────
+  // ── Approve & Ship Logic (Two-Path) ──────────────────────────────────
+
+  // Fetch parent requirements (Epics) from Azure DevOps
+  const fetchParentRequirements = async () => {
+    setIsLoadingParents(true);
+    try {
+      const res = await fetch(`${API_BASE}/parent-requirements`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to fetch parent requirements.");
+      setParentRequirements(data);
+    } catch (err) {
+      console.error("[Client] Error fetching parents:", err);
+      setParentRequirements([]);
+    } finally {
+      setIsLoadingParents(false);
+    }
+  };
+
+  // User clicks "Approve & Sync Backlog" -> directly sync using pre-selected parent requirement
   const triggerApprove = async () => {
+    if (selectedParentId) {
+      await approveAsChild(selectedParentId, selectedParentTitle);
+    } else {
+      await approveAsNewParent();
+    }
+  };
+
+  // Scenario 2: Create NEW Parent (Epic)
+  const approveAsNewParent = async () => {
+    setShowParentSelector(false);
     setIsSubmittingApprove(true);
-    setApproveLoadingMsg("Drafting Proposed Solution...");
+    setApproveLoadingMsg("Generating Technical Solution...");
     try {
       // Step A: Generate technical solution
       const solRes = await fetch(`${API_BASE}/generate-solution`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          approved_text: structuredText,
-          prompt_override: solutionPrompt
-        })
+        body: JSON.stringify({ approved_text: structuredText, prompt_override: solutionPrompt })
       });
-
       const solData = await solRes.json();
-      if (!solRes.ok) {
-        throw new Error(solData.error || "Failed to generate technical solution.");
-      }
-
+      if (!solRes.ok) throw new Error(solData.error || "Failed to generate solution.");
       const generatedSolution = solData.proposed_solution;
       setProposedSolution(generatedSolution);
 
-      // Step B: Approve and create work item in DevOps
-      setApproveLoadingMsg("Pushing to DevOps...");
-      const approveRes = await fetch(`${API_BASE}/approve`, {
+      // Step B: Create new parent Epic
+      setApproveLoadingMsg("Creating Parent Epic in DevOps...");
+      const approveRes = await fetch(`${API_BASE}/approve/new-parent`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          approved_text: structuredText,
-          proposed_solution: generatedSolution
-        })
+        body: JSON.stringify({ approved_text: structuredText, proposed_solution: generatedSolution })
       });
-
       const approveData = await approveRes.json();
-      if (!approveRes.ok) {
-        throw new Error(approveData.error || "Azure DevOps Work Item creation failed.");
-      }
+      if (!approveRes.ok) throw new Error(approveData.error || "Failed to create parent Epic.");
 
       setSuccessInfo({
         id: approveData.work_item_id,
@@ -629,27 +663,105 @@ export default function App() {
         title: approveData.title,
         message: approveData.message
       });
-      setWarningMessage(approveData.warning || "");
+      setWarningMessage("");
+      setChangesSummary(null);
 
-      // Save to aggregated project history workspace data engine
+      // Save to history
       const newHistoryItem = {
         id: Date.now(),
         date: new Date().toLocaleString(),
         source: audioFileName ? `Audio file: ${audioFileName}` : "Live Voice Recording",
-        rawTranscript: rawTranscript,
-        segments: segments,
-        structuredPRD: structuredText,
+        rawTranscript, segments, structuredPRD: structuredText,
         proposedSolution: generatedSolution,
         devopsId: approveData.work_item_id,
         devopsUrl: approveData.work_item_url,
         devopsTitle: approveData.title,
         status: "completed",
-        persistedAudioUrl: persistedAudioUrl
+        persistedAudioUrl,
+        isParent: true
       };
-
       const updatedHistory = [newHistoryItem, ...projectHistory];
       setProjectHistory(updatedHistory);
       localStorage.setItem("project_history", JSON.stringify(updatedHistory));
+      setPipelineState("SUCCESS");
+    } catch (err) {
+      triggerError(err.message);
+    } finally {
+      setIsSubmittingApprove(false);
+      setApproveLoadingMsg("");
+    }
+  };
+
+  // Scenario 1: Create Child (Task) under existing Parent (Epic)
+  const approveAsChild = async (parentId, parentTitle) => {
+    setShowParentSelector(false);
+    setIsSubmittingApprove(true);
+    setApproveLoadingMsg("Generating Technical Solution...");
+    try {
+      // Step A: Generate technical solution
+      const solRes = await fetch(`${API_BASE}/generate-solution`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approved_text: structuredText, prompt_override: solutionPrompt })
+      });
+      const solData = await solRes.json();
+      if (!solRes.ok) throw new Error(solData.error || "Failed to generate solution.");
+      const generatedSolution = solData.proposed_solution;
+      setProposedSolution(generatedSolution);
+
+      // Step B: Consolidate + create child under parent
+      setApproveLoadingMsg("Consolidating requirements & creating child Task...");
+      const approveRes = await fetch(`${API_BASE}/approve/existing-parent`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          parent_id: parentId,
+          approved_text: structuredText,
+          proposed_solution: generatedSolution
+        })
+      });
+      const approveData = await approveRes.json();
+      if (!approveRes.ok) throw new Error(approveData.error || "Failed to create child Task.");
+
+      setSuccessInfo({
+        id: approveData.work_item_id,
+        url: approveData.work_item_url,
+        title: approveData.title,
+        message: approveData.message
+      });
+      setWarningMessage("");
+      setChangesSummary(approveData.changesSummary || null);
+
+      // Save to history
+      const newHistoryItem = {
+        id: Date.now(),
+        date: new Date().toLocaleString(),
+        source: audioFileName ? `Audio file: ${audioFileName}` : "Live Voice Recording",
+        rawTranscript, segments, structuredPRD: structuredText,
+        proposedSolution: generatedSolution,
+        devopsId: approveData.work_item_id,
+        devopsUrl: approveData.work_item_url,
+        devopsTitle: approveData.title,
+        parentDevopsId: approveData.parent_id,
+        parentTitle: approveData.parent_title,
+        version: approveData.version,
+        status: "completed",
+        persistedAudioUrl,
+        isChild: true
+      };
+      const updatedHistory = [newHistoryItem, ...projectHistory];
+      setProjectHistory(updatedHistory);
+      localStorage.setItem("project_history", JSON.stringify(updatedHistory));
+
+      // Update selected parent description state with latest consolidated requirements
+      if (approveData.consolidatedReqMd) {
+        try {
+          const updatedHtml = await marked.parse(approveData.consolidatedReqMd);
+          setSelectedParentDescription(updatedHtml);
+        } catch (mErr) {
+          console.warn("Failed to parse consolidated markdown for parent state:", mErr);
+        }
+      }
 
       setPipelineState("SUCCESS");
     } catch (err) {
@@ -676,6 +788,10 @@ export default function App() {
     setIsEditingSolution(false);
     setWarningMessage("");
     setSegments([]);
+    setShowParentSelector(false);
+    setSelectedParentId(null);
+    setSelectedParentTitle("");
+    setChangesSummary(null);
     setPipelineState("IDLE");
   };
 
@@ -708,7 +824,8 @@ export default function App() {
           devopsOrgUrl,
           devopsPat,
           devopsProject,
-          devopsWorkItemType
+          devopsWorkItemType,
+          devopsParentWorkItemType
         })
       });
 
@@ -724,6 +841,7 @@ export default function App() {
       localStorage.setItem("settings_devops_pat", devopsPat);
       localStorage.setItem("settings_devops_project", devopsProject);
       localStorage.setItem("settings_devops_work_item_type", devopsWorkItemType);
+      localStorage.setItem("settings_devops_parent_work_item_type", devopsParentWorkItemType);
 
       setSettingsStatus({
         type: "success",
@@ -1177,6 +1295,135 @@ export default function App() {
                         </div>
                       </div>
                     </div>
+
+                    {/* Sync with DevOps Requirement Card (Available BEFORE audio is selected/recorded) */}
+                    <div className="bg-indigo-50/40 border border-indigo-100 rounded-xl p-4 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <div className="w-2 h-2 rounded-full bg-indigo-600"></div>
+                          <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider font-mono">
+                            Sync with DevOps Requirement
+                          </h3>
+                        </div>
+                        {isLoadingParents ? (
+                          <div className="flex items-center gap-1.5 text-[10px] text-indigo-600 font-semibold font-mono">
+                            <span className="w-3 h-3 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin"></span>
+                            <span>Loading Epics...</span>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={fetchParentRequirements}
+                            className="text-[10px] text-indigo-600 hover:underline font-semibold"
+                          >
+                            Refresh
+                          </button>
+                        )}
+                      </div>
+
+                      <p className="text-[11px] text-slate-500">
+                        Choose whether to link child tasks under an existing parent Epic or create a new Epic.
+                      </p>
+
+                      {/* Option 1: Create New Parent Epic */}
+                      <label
+                        onClick={() => {
+                          setSelectedParentId(null);
+                          setSelectedParentTitle("");
+                          setSelectedParentDescription("");
+                        }}
+                        className={`flex items-center justify-between p-2.5 rounded-lg border text-xs cursor-pointer transition-all ${
+                          selectedParentId === null
+                            ? "bg-indigo-50/80 border-indigo-400 text-indigo-900 font-bold shadow-sm"
+                            : "bg-white border-slate-200 text-slate-700 hover:border-slate-300"
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <input
+                            type="radio"
+                            name="parentSelectIdle"
+                            checked={selectedParentId === null}
+                            onChange={() => {
+                              setSelectedParentId(null);
+                              setSelectedParentTitle("");
+                              setSelectedParentDescription("");
+                            }}
+                            className="text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                          />
+                          <span>➕ Create New Parent Requirement (Epic)</span>
+                        </div>
+                        <span className="text-[9px] text-indigo-600 bg-indigo-100/60 px-2 py-0.5 rounded font-mono font-bold">
+                          New Epic
+                        </span>
+                      </label>
+
+                      {/* Option 2: Select Existing Epic */}
+                      <div className="space-y-1.5 pt-1">
+                        <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
+                          Or Select Existing Azure DevOps Epic:
+                        </span>
+                        <input
+                          type="text"
+                          placeholder="Search Epics by title or ID..."
+                          value={parentSearchQuery}
+                          onChange={(e) => setParentSearchQuery(e.target.value)}
+                          className="w-full bg-white text-slate-900 placeholder-slate-400 text-xs font-semibold p-2.5 rounded-lg border border-slate-300 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 focus:outline-none shadow-sm transition-all"
+                        />
+
+                        <div className="max-h-36 overflow-y-auto space-y-1 pt-1">
+                          {isLoadingParents ? (
+                            <div className="flex items-center justify-center py-5 gap-2 text-xs font-semibold text-indigo-600 bg-indigo-50/50 rounded-lg border border-indigo-100">
+                              <span className="w-3.5 h-3.5 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin"></span>
+                              <span>Fetching Azure DevOps Epics...</span>
+                            </div>
+                          ) : parentRequirements.length === 0 ? (
+                            <div className="text-[11px] text-slate-400 py-2.5 text-center bg-white rounded-lg border border-slate-100">
+                              No DevOps Epics found. (Will create new parent)
+                            </div>
+                          ) : (
+                            parentRequirements
+                              .filter((p) =>
+                                (p.title || "").toLowerCase().includes(parentSearchQuery.toLowerCase()) ||
+                                String(p.id).includes(parentSearchQuery)
+                              )
+                              .map((parent) => {
+                                const isSelected = selectedParentId === parent.id;
+                                return (
+                                  <label
+                                    key={parent.id}
+                                    onClick={() => {
+                                      setSelectedParentId(parent.id);
+                                      setSelectedParentTitle(parent.title);
+                                      setSelectedParentDescription(parent.description || "");
+                                    }}
+                                    className={`flex items-center justify-between p-2.5 rounded-lg border text-xs cursor-pointer transition-all ${
+                                      isSelected
+                                        ? "bg-indigo-50/90 border-indigo-400 text-indigo-950 font-bold shadow-sm"
+                                        : "bg-white border-slate-200 text-slate-800 hover:bg-slate-50"
+                                    }`}
+                                  >
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      <input
+                                        type="radio"
+                                        name="parentSelectIdle"
+                                        checked={isSelected}
+                                        onChange={() => {
+                                          setSelectedParentId(parent.id);
+                                          setSelectedParentTitle(parent.title);
+                                          setSelectedParentDescription(parent.description || "");
+                                        }}
+                                        className="text-indigo-600 focus:ring-indigo-500 cursor-pointer shrink-0"
+                                      />
+                                      <span className="font-mono text-indigo-700 font-bold shrink-0">#{parent.id}</span>
+                                      <span className="truncate font-semibold text-slate-800">{parent.title}</span>
+                                    </div>
+                                  </label>
+                                );
+                              })
+                          )}
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 )}
 
@@ -1213,36 +1460,212 @@ export default function App() {
 
                 {/* Pipeline State: PREVIEW (Selected/Recorded Audio) */}
                 {pipelineState === "PREVIEW" && (
-                  <div className="flex-1 flex flex-col justify-between">
+                  <div className="flex-1 flex flex-col justify-between space-y-4">
                     <div>
-                      <h2 className="text-lg font-bold text-slate-800">Preview Audio Input</h2>
-                      <p className="text-slate-400 text-xs mt-1">Listen to your recording or file before starting the pipeline.</p>
+                      <h2 className="text-lg font-bold text-slate-800">Preview Input & Sync Parent Requirement</h2>
+                      <p className="text-slate-400 text-xs mt-1">Recording complete. Select your target Azure DevOps parent Epic or create a new one.</p>
                     </div>
 
-                    <div className="my-8 bg-slate-50 border border-slate-200 rounded-xl p-5 space-y-4">
+                    <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
                       <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 bg-indigo-50 text-indigo-600 rounded-lg flex items-center justify-center border border-indigo-100">
+                        <div className="w-9 h-9 bg-indigo-50 text-indigo-600 rounded-lg flex items-center justify-center border border-indigo-100 shrink-0">
                           <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" />
                           </svg>
                         </div>
                         <div className="flex-1 min-w-0">
                           <span className="text-xs font-bold text-slate-700 block truncate">{audioFileName}</span>
-                          <span className="text-[10px] text-slate-400 block font-mono">Ready for processing</span>
+                          <span className="text-[10px] text-slate-400 block font-mono">Audio ready for processing</span>
                         </div>
                       </div>
 
                       {audioUrl && (
-                        <audio ref={previewPlayerRef} src={audioUrl} controls className="w-full rounded-md border border-slate-200 shadow-inner bg-slate-100" />
+                        <audio ref={previewPlayerRef} src={audioUrl} controls className="w-full rounded-md border border-slate-200 shadow-inner bg-slate-100 h-9" />
                       )}
                     </div>
 
-                    <button
-                      onClick={clearSelectedAudio}
-                      className="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-600 font-semibold rounded-xl text-xs transition-all border border-slate-200 mb-2"
-                    >
-                      Clear & Try Different Input
-                    </button>
+                    {/* Text Notes Area */}
+                    <div className="space-y-2">
+                      <label className="block text-xs font-bold text-slate-600 uppercase tracking-wider">
+                        Alternative: Paste Raw Text Notes
+                      </label>
+                      <textarea
+                        value={pastedText}
+                        onChange={(e) => setPastedText(e.target.value)}
+                        placeholder="Paste text transcript or product raw requirements directly here..."
+                        className="w-full h-24 bg-slate-50 text-slate-800 text-xs p-3 rounded-lg border border-slate-200 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 resize-none"
+                      />
+                    </div>
+
+                    {/* Context Template Dropdown */}
+                    <div className="space-y-2">
+                      <label className="block text-xs font-bold text-slate-600 uppercase tracking-wider">
+                        Project Context Template
+                      </label>
+                      <div className="relative">
+                        <select
+                          value={contextTemplate}
+                          onChange={(e) => setContextTemplate(e.target.value)}
+                          className="w-full bg-slate-50 text-slate-700 text-xs p-3 rounded-lg border border-slate-200 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 appearance-none font-semibold cursor-pointer"
+                        >
+                          <option value="feature-design">e.g. New Feature Design</option>
+                          <option value="bug-fix">e.g. Bug Report & Resolution Analysis</option>
+                          <option value="grooming">e.g. Refinement / Backlog Grooming</option>
+                        </select>
+                        <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-3 text-slate-400">
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+                          </svg>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Sync with Existing Requirement (Azure DevOps) Section */}
+                    <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-3 shadow-sm text-left">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="w-2 h-2 rounded-full bg-indigo-600"></span>
+                          <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider">
+                            Sync with DevOps Requirement
+                          </h3>
+                        </div>
+                        {isLoadingParents ? (
+                          <div className="flex items-center gap-1.5 text-[10px] text-indigo-600 font-semibold font-mono">
+                            <span className="w-3 h-3 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin"></span>
+                            <span>Loading Epics...</span>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={fetchParentRequirements}
+                            className="text-[10px] text-indigo-600 hover:underline font-semibold"
+                          >
+                            Refresh
+                          </button>
+                        )}
+                      </div>
+
+                      <p className="text-[11px] text-slate-500">
+                        Choose whether to link child tasks under an existing parent Epic or create a new Epic.
+                      </p>
+
+                      {/* Option 1: Create New Parent Epic */}
+                      <label
+                        onClick={() => {
+                          setSelectedParentId(null);
+                          setSelectedParentTitle("");
+                        }}
+                        className={`flex items-center justify-between p-2.5 rounded-lg border text-xs cursor-pointer transition-all ${
+                          selectedParentId === null
+                            ? "bg-indigo-50/80 border-indigo-400 text-indigo-900 font-bold shadow-sm"
+                            : "bg-slate-50 border-slate-200 text-slate-700 hover:border-slate-300"
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <input
+                            type="radio"
+                            name="parentSelectPreview"
+                            checked={selectedParentId === null}
+                            onChange={() => {
+                              setSelectedParentId(null);
+                              setSelectedParentTitle("");
+                            }}
+                            className="text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                          />
+                          <span>➕ Create New Parent Requirement (Epic)</span>
+                        </div>
+                        <span className="text-[9px] text-indigo-600 bg-indigo-100/60 px-2 py-0.5 rounded font-mono font-bold">
+                          New Epic
+                        </span>
+                      </label>
+
+                      {/* Option 2: Select Existing Epic */}
+                      <div className="space-y-1.5 pt-1">
+                        <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
+                          Or Select Existing Azure DevOps Epic:
+                        </span>
+                        <input
+                          type="text"
+                          placeholder="Search Epics by title or ID..."
+                          value={parentSearchQuery}
+                          onChange={(e) => setParentSearchQuery(e.target.value)}
+                          className="w-full bg-white text-slate-900 placeholder-slate-400 text-xs font-semibold p-2.5 rounded-lg border border-slate-300 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 focus:outline-none shadow-sm transition-all"
+                        />
+
+                        <div className="max-h-36 overflow-y-auto space-y-1 pt-1">
+                          {isLoadingParents ? (
+                            <div className="flex items-center justify-center py-5 gap-2 text-xs font-semibold text-indigo-600 bg-indigo-50/50 rounded-lg border border-indigo-100">
+                              <span className="w-3.5 h-3.5 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin"></span>
+                              <span>Fetching Azure DevOps Epics...</span>
+                            </div>
+                          ) : parentRequirements.length === 0 ? (
+                            <div className="text-[11px] text-slate-400 py-2.5 text-center bg-slate-50 rounded-lg border border-slate-100">
+                              No DevOps Epics found. (Will create new parent)
+                            </div>
+                          ) : (
+                            parentRequirements
+                              .filter((p) =>
+                                (p.title || "").toLowerCase().includes(parentSearchQuery.toLowerCase()) ||
+                                String(p.id).includes(parentSearchQuery)
+                              )
+                              .map((parent) => {
+                                const isSelected = selectedParentId === parent.id;
+                                return (
+                                  <label
+                                    key={parent.id}
+                                    onClick={() => {
+                                      setSelectedParentId(parent.id);
+                                      setSelectedParentTitle(parent.title);
+                                      setSelectedParentDescription(parent.description || "");
+                                    }}
+                                    className={`flex items-center justify-between p-2.5 rounded-lg border text-xs cursor-pointer transition-all ${
+                                      isSelected
+                                        ? "bg-indigo-50/90 border-indigo-400 text-indigo-950 font-bold shadow-sm"
+                                        : "bg-white border-slate-200 text-slate-800 hover:bg-slate-50"
+                                    }`}
+                                  >
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      <input
+                                        type="radio"
+                                        name="parentSelectPreview"
+                                        checked={isSelected}
+                                        onChange={() => {
+                                          setSelectedParentId(parent.id);
+                                          setSelectedParentTitle(parent.title);
+                                          setSelectedParentDescription(parent.description || "");
+                                        }}
+                                        className="text-indigo-600 focus:ring-indigo-500 cursor-pointer shrink-0"
+                                      />
+                                      <span className="font-mono text-indigo-700 font-bold shrink-0">#{parent.id}</span>
+                                      <span className="truncate font-semibold text-slate-800">{parent.title}</span>
+                                    </div>
+                                  </label>
+                                );
+                              })
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 pt-2">
+                      <button
+                        type="button"
+                        onClick={clearSelectedAudio}
+                        className="py-2.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-600 font-semibold rounded-xl text-xs transition-all border border-slate-200"
+                      >
+                        Clear Audio
+                      </button>
+                      <button
+                        type="button"
+                        onClick={submitAudio}
+                        className="flex-1 py-2.5 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs transition-all shadow-md shadow-indigo-200 flex items-center justify-center gap-2"
+                      >
+                        <span>Start Pipeline & AI Structuring</span>
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
+                        </svg>
+                      </button>
+                    </div>
                   </div>
                 )}
 
@@ -1447,6 +1870,45 @@ export default function App() {
                       )}
                     </div>
 
+                    {/* Changes Summary (shown for child work items) */}
+                    {changesSummary && (
+                      <div className="bg-indigo-50/50 border border-indigo-100 rounded-xl p-3 mt-3">
+                        <h4 className="text-[10px] font-bold text-indigo-700 uppercase tracking-wider mb-2 font-mono">Changes Detected</h4>
+                        <div className="grid grid-cols-2 gap-1.5 text-[10px]">
+                          {(changesSummary.newFeatures || []).length > 0 && (
+                            <div className="flex items-center gap-1.5 bg-white rounded-lg px-2 py-1.5 border border-indigo-100">
+                              <span className="text-emerald-600">✅</span>
+                              <span className="text-slate-700 font-semibold">{changesSummary.newFeatures.length} New Feature{changesSummary.newFeatures.length > 1 ? "s" : ""}</span>
+                            </div>
+                          )}
+                          {(changesSummary.enhancements || []).length > 0 && (
+                            <div className="flex items-center gap-1.5 bg-white rounded-lg px-2 py-1.5 border border-indigo-100">
+                              <span className="text-blue-600">🔄</span>
+                              <span className="text-slate-700 font-semibold">{changesSummary.enhancements.length} Enhancement{changesSummary.enhancements.length > 1 ? "s" : ""}</span>
+                            </div>
+                          )}
+                          {(changesSummary.requirementChanges || []).length > 0 && (
+                            <div className="flex items-center gap-1.5 bg-white rounded-lg px-2 py-1.5 border border-indigo-100">
+                              <span className="text-amber-600">📝</span>
+                              <span className="text-slate-700 font-semibold">{changesSummary.requirementChanges.length} Req Change{changesSummary.requirementChanges.length > 1 ? "s" : ""}</span>
+                            </div>
+                          )}
+                          {(changesSummary.technicalChanges || []).length > 0 && (
+                            <div className="flex items-center gap-1.5 bg-white rounded-lg px-2 py-1.5 border border-indigo-100">
+                              <span className="text-purple-600">🔧</span>
+                              <span className="text-slate-700 font-semibold">{changesSummary.technicalChanges.length} Tech Change{changesSummary.technicalChanges.length > 1 ? "s" : ""}</span>
+                            </div>
+                          )}
+                          {(changesSummary.bugFixes || []).length > 0 && (
+                            <div className="flex items-center gap-1.5 bg-white rounded-lg px-2 py-1.5 border border-indigo-100">
+                              <span className="text-red-600">🐛</span>
+                              <span className="text-slate-700 font-semibold">{changesSummary.bugFixes.length} Bug Fix{changesSummary.bugFixes.length > 1 ? "es" : ""}</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
                     <div className="space-y-2 mt-4">
                       {proposedSolution && (
                         <button
@@ -1508,49 +1970,95 @@ export default function App() {
 
               </div>
 
-              {/* Right Column: Visual Core Workflow Sequence */}
+              {/* Right Column: Target DevOps Requirement Details (When Ticket Selected in IDLE/PREVIEW) OR Core Workflow Sequence (Default/Active) */}
               <div className="col-span-12 lg:col-span-6 bg-white border border-slate-200 rounded-2xl p-6 shadow-sm min-h-[500px] flex flex-col justify-between">
-                <div>
-                  <h2 className="text-lg font-bold text-slate-800">Core Workflow Sequence</h2>
-                  <p className="text-slate-400 text-xs mt-1">Visualize multi-orchestrator / multi-agent orchestration.</p>
-
-                  {/* Workflow Audio Integration */}
-                  {audioUrl && (
-                    <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 mt-3 flex items-center justify-between gap-3 animate-fadeIn">
-                      <div className="flex items-center gap-2.5 flex-1 min-w-0">
-                        <div className="w-8 h-8 rounded-lg bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 shrink-0">
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" />
-                          </svg>
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <span className="text-[10px] font-bold text-slate-700 block truncate leading-tight">{audioFileName}</span>
-                          <span className="text-[9px] text-indigo-600 font-semibold block leading-tight mt-0.5 font-mono uppercase tracking-wider">Active Workflow Input</span>
-                        </div>
+                {(pipelineState === "IDLE" || pipelineState === "PREVIEW") && selectedParentId ? (
+                  /* IDLE / PREVIEW STATE WITH TICKET SELECTED: Display Target DevOps Requirement Description Context */
+                  <div className="flex-1 flex flex-col">
+                    <div className="flex items-center justify-between border-b border-slate-150 pb-3">
+                      <div>
+                        <h2 className="text-lg font-bold text-slate-800">Target DevOps Requirement Details</h2>
+                        <p className="text-slate-400 text-xs mt-0.5">
+                          Existing description & specification context from Azure DevOps.
+                        </p>
                       </div>
-                      <div className="flex-1 max-w-[200px]">
-                        <audio ref={reviewPlayerRef} src={audioUrl} controls className="w-full h-8 rounded bg-transparent" />
-                      </div>
+                      <span className="font-mono text-xs text-indigo-700 font-bold bg-indigo-50 px-2.5 py-1 rounded-lg border border-indigo-100 shadow-sm">
+                        Epic #{selectedParentId}
+                      </span>
                     </div>
-                  )}
 
-                  {/* Legend dots */}
-                  <div className="flex justify-end gap-3 mt-3 border-b border-slate-100 pb-3">
-                    <div className="flex items-center gap-1 text-[10px] text-slate-500 font-semibold uppercase tracking-wider font-mono">
-                      <span className="w-2 h-2 rounded-full bg-indigo-600"></span> Active
-                    </div>
-                    <div className="flex items-center gap-1 text-[10px] text-slate-500 font-semibold uppercase tracking-wider font-mono">
-                      <span className="w-2 h-2 rounded-full bg-slate-300"></span> Waiting
-                    </div>
-                    <div className="flex items-center gap-1 text-[10px] text-slate-500 font-semibold uppercase tracking-wider font-mono">
-                      <span className="w-2 h-2 rounded-full bg-emerald-500"></span> Completed
+                    <div className="mt-4 space-y-4 text-left animate-fadeIn flex-1 flex flex-col">
+                      <div className="bg-indigo-50/60 border border-indigo-100 rounded-xl p-4 shadow-sm">
+                        <span className="text-[10px] font-bold text-indigo-700 uppercase tracking-wider font-mono block mb-1">
+                          Requirement Title
+                        </span>
+                        <h3 className="text-sm font-bold text-slate-900">{selectedParentTitle}</h3>
+                      </div>
+
+                      <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-2.5 flex-1 flex flex-col">
+                        <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+                          <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider font-mono">
+                            Requirement Description Context
+                          </span>
+                          <span className="text-[10px] text-slate-400 font-mono">Azure DevOps PRD</span>
+                        </div>
+
+                        {selectedParentDescription ? (
+                          <div
+                            className="text-xs text-slate-700 leading-relaxed max-h-[360px] overflow-y-auto pr-1 prose prose-slate max-w-none text-left"
+                            dangerouslySetInnerHTML={{ __html: selectedParentDescription }}
+                          />
+                        ) : (
+                          <div className="py-12 text-center text-slate-400 text-xs italic bg-white rounded-lg border border-slate-100">
+                            No HTML/Markdown description content returned for Epic #{selectedParentId} in Azure DevOps.
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </div>
+                ) : (
+                  /* DEFAULT / ACTIVE PIPELINE STATE: Display Core Workflow Sequence Visualizer */
+                  <div>
+                    <h2 className="text-lg font-bold text-slate-800">Core Workflow Sequence</h2>
+                    <p className="text-slate-400 text-xs mt-1">Visualize multi-orchestrator / multi-agent orchestration.</p>
 
-                  {/* Flow Diagram (Active Scope Only) */}
-                  <div className="mt-8 space-y-6 relative pl-4">
-                    {/* Vertical linking line */}
-                    <div className="absolute left-[31px] top-6 bottom-6 w-0.5 bg-slate-200 -z-10"></div>
+                    {/* Workflow Audio Integration */}
+                    {audioUrl && (
+                      <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 mt-3 flex items-center justify-between gap-3 animate-fadeIn">
+                        <div className="flex items-center gap-2.5 flex-1 min-w-0">
+                          <div className="w-8 h-8 rounded-lg bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 shrink-0">
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" />
+                            </svg>
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <span className="text-[10px] font-bold text-slate-700 block truncate leading-tight">{audioFileName}</span>
+                            <span className="text-[9px] text-indigo-600 font-semibold block leading-tight mt-0.5 font-mono uppercase tracking-wider">Active Workflow Input</span>
+                          </div>
+                        </div>
+                        <div className="flex-1 max-w-[200px]">
+                          <audio ref={reviewPlayerRef} src={audioUrl} controls className="w-full h-8 rounded bg-transparent" />
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Legend dots */}
+                    <div className="flex justify-end gap-3 mt-3 border-b border-slate-100 pb-3">
+                      <div className="flex items-center gap-1 text-[10px] text-slate-500 font-semibold uppercase tracking-wider font-mono">
+                        <span className="w-2 h-2 rounded-full bg-indigo-600"></span> Active
+                      </div>
+                      <div className="flex items-center gap-1 text-[10px] text-slate-500 font-semibold uppercase tracking-wider font-mono">
+                        <span className="w-2 h-2 rounded-full bg-slate-300"></span> Waiting
+                      </div>
+                      <div className="flex items-center gap-1 text-[10px] text-slate-500 font-semibold uppercase tracking-wider font-mono">
+                        <span className="w-2 h-2 rounded-full bg-emerald-500"></span> Completed
+                      </div>
+                    </div>
+
+                    {/* Flow Diagram (Active Scope Only) */}
+                    <div className="mt-8 space-y-6 relative pl-4">
+                      {/* Vertical linking line */}
+                      <div className="absolute left-[31px] top-6 bottom-6 w-0.5 bg-slate-200 -z-10"></div>
 
                     {/* Step 1: START Input Ingested */}
                     <div className="flex items-center justify-between bg-slate-50/50 border border-slate-150 rounded-xl p-3.5">
@@ -1649,25 +2157,88 @@ export default function App() {
                     </div>
                   </div>
                 </div>
+                )}
 
-                {/* Workflow Activation Footer Button */}
-                <div className="pt-6 border-t border-slate-150 mt-6">
-                  {pipelineState === "IDLE" || pipelineState === "PREVIEW" ? (
-                    <button
-                      onClick={submitAudio}
-                      disabled={(!audioBlob && !pastedText.trim()) || (!geminiApiKey || !devopsPat || !devopsOrgUrl || !devopsProject)}
-                      className="w-full py-3 px-4 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-200 disabled:text-slate-400 text-white font-bold rounded-xl text-xs transition-all shadow-md shadow-blue-150 flex items-center justify-center gap-2"
-                    >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M15.59 14.37a6 6 0 01-5.84 7.38v-4.8m5.84-2.58a14.98 14.98 0 006.16-12.12A14.98 14.98 0 009.64 8.38l-1.32 1.32m8.59-1.32l-1.32 1.32M9.64 8.38A14.98 14.98 0 001.5 20.5a14.98 14.98 0 0012.12-8.16l1.32-1.32M9.64 8.38L8.32 9.7M12 2.25c-.292 0-.582.008-.87.024A14.98 14.98 0 0118 6.162c0-.29-.008-.58-.024-.87A2.25 2.25 0 0015.75 3H12zm-3 0c.292 0 .582.008.87.024A14.98 14.98 0 006 6.162c0-.29.008-.58.024-.87A2.25 2.25 0 018.25 3H9z" />
-                      </svg>
-                      {(!geminiApiKey || !devopsPat || !devopsOrgUrl || !devopsProject) ? "Configuration Required" : "Start Automation Pipeline"}
-                    </button>
-                  ) : (
-                    <div className="text-center text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono py-3">
-                      Pipeline execution locked: {pipelineState}
-                    </div>
-                  )}
+                {/* Workflow Footer Progress Bar (Replaced Start Automation Pipeline button) */}
+                <div className="pt-5 border-t border-slate-150 mt-6 space-y-2.5 text-left">
+                  <div className="flex items-center justify-between text-xs font-bold font-mono">
+                    <span className="text-slate-700 flex items-center gap-2">
+                      {pipelineState === "PROCESSING" || isSubmittingApprove ? (
+                        <span className="relative flex h-2 w-2">
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
+                          <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-600"></span>
+                        </span>
+                      ) : pipelineState === "SUCCESS" ? (
+                        <span className="h-2 w-2 rounded-full bg-emerald-500"></span>
+                      ) : (
+                        <span className="h-2 w-2 rounded-full bg-slate-300"></span>
+                      )}
+                      {pipelineState === "PROCESSING"
+                        ? processingMsg || "Processing Audio Pipeline..."
+                        : isSubmittingApprove
+                        ? approveLoadingMsg || "Syncing with Azure DevOps..."
+                        : pipelineState === "REVIEW"
+                        ? "Human Gate Review Checkpoint"
+                        : pipelineState === "SUCCESS"
+                        ? "Pipeline Execution Complete"
+                        : pipelineState === "PREVIEW"
+                        ? "Input Loaded — Ready for Structuring"
+                        : "Pipeline Idle — Awaiting Input"}
+                    </span>
+                    <span className="text-indigo-600 font-bold font-mono">
+                      {pipelineState === "PROCESSING"
+                        ? `${Math.round(processingProgress)}%`
+                        : isSubmittingApprove
+                        ? "85%"
+                        : pipelineState === "REVIEW"
+                        ? "50%"
+                        : pipelineState === "SUCCESS"
+                        ? "100%"
+                        : pipelineState === "PREVIEW"
+                        ? "10%"
+                        : "0%"}
+                    </span>
+                  </div>
+
+                  {/* Progress Bar Track */}
+                  <div className="w-full bg-slate-100 rounded-full h-2.5 border border-slate-200 overflow-hidden p-0.5 shadow-inner">
+                    <div
+                      className={`h-full rounded-full transition-all duration-500 ${
+                        pipelineState === "SUCCESS"
+                          ? "bg-gradient-to-r from-emerald-500 to-teal-500"
+                          : pipelineState === "ERROR"
+                          ? "bg-red-500"
+                          : "bg-gradient-to-r from-indigo-600 via-purple-600 to-blue-600"
+                      }`}
+                      style={{
+                        width:
+                          pipelineState === "PROCESSING"
+                            ? `${processingProgress}%`
+                            : isSubmittingApprove
+                            ? "85%"
+                            : pipelineState === "REVIEW"
+                            ? "50%"
+                            : pipelineState === "SUCCESS"
+                            ? "100%"
+                            : pipelineState === "PREVIEW"
+                            ? "10%"
+                            : "0%"
+                      }}
+                    ></div>
+                  </div>
+
+                  <div className="flex justify-between items-center text-[10px] text-slate-400 font-mono">
+                    <span>Current Stage: <strong className="text-slate-600 uppercase">{pipelineState}</strong></span>
+                    <span>
+                      {pipelineState === "PROCESSING"
+                        ? "Gemini Whisper & Structuring"
+                        : pipelineState === "REVIEW"
+                        ? "Human Checkpoint Gate"
+                        : pipelineState === "SUCCESS"
+                        ? "Azure DevOps Linked"
+                        : "Ingestion Stage"}
+                    </span>
+                  </div>
                 </div>
 
               </div>
@@ -1910,6 +2481,7 @@ export default function App() {
                               />
                             </th>
                             <th className="p-4">Timestamp</th>
+                            <th className="p-4">Task Name</th>
                             <th className="p-4">Source</th>
                             <th className="p-4">DevOps Ticket</th>
                             <th className="p-4">Status</th>
@@ -1929,20 +2501,35 @@ export default function App() {
                                     className="w-4 h-4 rounded border-slate-350 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
                                   />
                                 </td>
-                                <td className="p-4 font-mono font-semibold text-slate-600">{item.date}</td>
-                                <td className="p-4 text-slate-700 font-medium truncate max-w-[200px] flex items-center gap-1.5">
-                                  {item.persistedAudioUrl && (
-                                    <span className="w-5 h-5 rounded bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 shrink-0" title="Audio Recording Attached">
-                                      <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
-                                        <path strokeLinecap="round" strokeLinejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" />
-                                      </svg>
-                                    </span>
-                                  )}
-                                  {item.source}
+                                <td className="p-4 font-mono font-semibold text-slate-600 whitespace-nowrap">{item.date}</td>
+                                <td className="p-4 text-slate-700 font-medium max-w-[240px]">
+                                  <span className="truncate text-xs font-semibold text-slate-800 block" title={item.devopsTitle || "Untitled Task"}>
+                                    {item.devopsTitle || "Untitled Task"}
+                                  </span>
                                 </td>
-                                <td className="p-4">
+                                <td className="p-4 text-slate-600 font-medium max-w-[180px]">
+                                  <div className="truncate flex items-center gap-1.5 text-xs" title={item.source}>
+                                    {item.persistedAudioUrl && (
+                                      <span className="w-5 h-5 rounded bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 shrink-0" title="Audio Recording Attached">
+                                        <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                                          <path strokeLinecap="round" strokeLinejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" />
+                                        </svg>
+                                      </span>
+                                    )}
+                                    <span className="truncate">{item.source}</span>
+                                  </div>
+                                </td>
+                                <td className="p-4 whitespace-nowrap">
                                   {item.devopsId ? (
-                                    <span className="text-indigo-600 font-bold">#{item.devopsId}</span>
+                                    <div className="flex items-center gap-1.5">
+                                      <span className="text-indigo-600 font-bold">#{item.devopsId}</span>
+                                      {item.isParent && (
+                                        <span className="px-1.5 py-0.5 text-[9px] font-bold bg-purple-50 text-purple-600 rounded border border-purple-100 font-mono">Epic</span>
+                                      )}
+                                      {item.isChild && (
+                                        <span className="px-1.5 py-0.5 text-[9px] font-bold bg-blue-50 text-blue-600 rounded border border-blue-100 font-mono">Task</span>
+                                      )}
+                                    </div>
                                   ) : (
                                     <span className="text-slate-400 font-mono">N/A</span>
                                   )}

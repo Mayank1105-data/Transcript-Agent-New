@@ -8,7 +8,9 @@ import "dotenv/config";
 
 import { transcribeAudio } from "./transcriptionService.js";
 import { structureTranscript, redoStructure, generateSolution, structuredDocToMarkdown, testGeminiConnection } from "./llmProcessor.js";
-import { createWorkItem, uploadAttachment, testDevOpsConnection, getWorkItemComments, postWorkItemComment, updateWorkItemComment, getWorkItem } from "./devopsIntegrator.js";
+import { createWorkItem, uploadAttachment, testDevOpsConnection, getWorkItemComments, postWorkItemComment, updateWorkItemComment, getWorkItem, queryParentWorkItems, getWorkItemWithRelations, getWorkItemAttachmentContent, createParentWorkItem, createChildWorkItem, getChildWorkItems, updateWorkItemDescription } from "./devopsIntegrator.js";
+import { consolidateRequirements, generateTranscriptSummary, analyzeTranscriptChanges } from "./requirementConsolidator.js";
+import { marked } from "marked";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -237,6 +239,350 @@ app.post("/api/approve", async (req, res) => {
   } catch (error) {
     console.error("[Server] Azure DevOps integration failed:", error);
     res.status(500).json({ error: error.message || "Failed to create Azure DevOps ticket." });
+  }
+});
+
+// ── Requirement Management — Parent-Child Hierarchy ─────────────────
+
+/**
+ * Fetch all parent requirement work items (Epics) for the selector dropdown.
+ */
+app.get("/api/parent-requirements", async (req, res) => {
+  try {
+    const parents = await queryParentWorkItems();
+    res.json(parents);
+  } catch (error) {
+    console.error("[Server] Error fetching parent requirements:", error);
+    res.status(500).json({ error: error.message || "Failed to fetch parent requirements." });
+  }
+});
+
+/**
+ * Load full context for a parent requirement — existing docs, child items, attachments.
+ */
+app.get("/api/parent-requirements/:id/context", async (req, res) => {
+  const parentId = req.params.id;
+
+  try {
+    console.log(`[Server] Loading context for parent requirement #${parentId}...`);
+
+    // 1. Get parent with relations to find attachments
+    const parentItem = await getWorkItemWithRelations(parentId);
+    const parentFields = parentItem.fields || {};
+    const relations = parentItem.relations || [];
+
+    // 2. Get child work items
+    const children = await getChildWorkItems(parentId);
+    console.log(`[Server] Found ${children.length} child work items for parent #${parentId}`);
+
+    // 3. Find the latest child (most recently created) and load its attachments
+    let existingReqMd = "";
+    let existingTechMd = "";
+    let latestChildId = null;
+
+    if (children.length > 0) {
+      // Sort by createdDate descending to get the latest
+      const sortedChildren = [...children].sort(
+        (a, b) => new Date(b.createdDate) - new Date(a.createdDate)
+      );
+      const latestChild = sortedChildren[0];
+      latestChildId = latestChild.id;
+
+      console.log(`[Server] Loading attachments from latest child #${latestChildId}...`);
+
+      // Get the latest child with relations to find its attachments
+      const childItem = await getWorkItemWithRelations(latestChildId);
+      const childRelations = childItem.relations || [];
+
+      // Find and download Requirement.md and TechnicalDesign.md attachments
+      for (const rel of childRelations) {
+        if (rel.rel === "AttachedFile" && rel.attributes) {
+          const name = rel.attributes.name || "";
+          try {
+            if (name.toLowerCase().includes("requirement")) {
+              existingReqMd = await getWorkItemAttachmentContent(rel.url);
+              console.log(`[Server] Loaded existing Requirement.md (${existingReqMd.length} chars)`);
+            } else if (name.toLowerCase().includes("technical")) {
+              existingTechMd = await getWorkItemAttachmentContent(rel.url);
+              console.log(`[Server] Loaded existing TechnicalDesign.md (${existingTechMd.length} chars)`);
+            }
+          } catch (attErr) {
+            console.warn(`[Server] Warning: Failed to download attachment "${name}":`, attErr.message);
+          }
+        }
+      }
+    }
+
+    // 4. If no attachments found on children, try the parent itself
+    if (!existingReqMd && !existingTechMd) {
+      for (const rel of relations) {
+        if (rel.rel === "AttachedFile" && rel.attributes) {
+          const name = rel.attributes.name || "";
+          try {
+            if (name.toLowerCase().includes("requirement")) {
+              existingReqMd = await getWorkItemAttachmentContent(rel.url);
+            } else if (name.toLowerCase().includes("technical")) {
+              existingTechMd = await getWorkItemAttachmentContent(rel.url);
+            }
+          } catch (attErr) {
+            console.warn(`[Server] Warning: Failed to download parent attachment "${name}":`, attErr.message);
+          }
+        }
+      }
+    }
+
+    res.json({
+      parentId: parseInt(parentId),
+      parentTitle: parentFields["System.Title"] || "",
+      parentState: parentFields["System.State"] || "",
+      children,
+      latestChildId,
+      existingReqMd,
+      existingTechMd,
+      childCount: children.length
+    });
+  } catch (error) {
+    console.error(`[Server] Error loading parent context for #${parentId}:`, error);
+    res.status(500).json({ error: error.message || "Failed to load parent context." });
+  }
+});
+
+/**
+ * Scenario 2: Create a NEW Parent (Epic) requirement work item.
+ */
+app.post("/api/approve/new-parent", async (req, res) => {
+  const { approved_text, proposed_solution } = req.body;
+
+  if (!approved_text) {
+    return res.status(400).json({ error: "No approved_text provided." });
+  }
+
+  console.log(`[Server] Creating new parent requirement (Epic) in Azure DevOps...`);
+
+  try {
+    // 1. Generate transcript summary
+    const transcriptSummary = await generateTranscriptSummary(approved_text);
+
+    // 2. Upload attachments
+    const attachments = [];
+
+    try {
+      const reqUrl = await uploadAttachment(approved_text, "Requirement.md");
+      attachments.push({ url: reqUrl, comment: "AI-generated Requirement.md" });
+    } catch (err) {
+      console.warn("[Server] Warning: Failed to upload Requirement.md:", err.message);
+    }
+
+    if (proposed_solution) {
+      try {
+        const techUrl = await uploadAttachment(proposed_solution, "TechnicalDesign.md");
+        attachments.push({ url: techUrl, comment: "AI-generated TechnicalDesign.md" });
+      } catch (err) {
+        console.warn("[Server] Warning: Failed to upload TechnicalDesign.md:", err.message);
+      }
+    }
+
+    try {
+      const summaryUrl = await uploadAttachment(transcriptSummary, "TranscriptSummary.md");
+      attachments.push({ url: summaryUrl, comment: "AI-generated Transcript Summary" });
+    } catch (err) {
+      console.warn("[Server] Warning: Failed to upload TranscriptSummary.md:", err.message);
+    }
+
+    // 3. Build description HTML
+    const descHtml = await marked.parse(approved_text);
+
+    // 4. Extract title from the structured text
+    const titleMatch = approved_text.match(/^#\s+(.+)$/m);
+    const rawTitle = titleMatch ? titleMatch[1].trim().replace(/^(Epic|PRD|Requirement|Feature):\s*/i, "") : "";
+    const title = rawTitle ? rawTitle.substring(0, 255) : "New Requirements Epic";
+
+    // 5. Create the parent (Epic) work item
+    const result = await createParentWorkItem(title, descHtml, attachments);
+    console.log(`[Server] Parent Epic #${result.id} created: ${result.url}`);
+
+    res.json({
+      work_item_id: result.id,
+      work_item_url: result.url,
+      title: result.title,
+      message: `Parent Epic #${result.id} created successfully!`,
+      transcriptSummary,
+      isParent: true
+    });
+  } catch (error) {
+    console.error("[Server] Failed to create parent requirement:", error);
+    res.status(500).json({ error: error.message || "Failed to create parent requirement." });
+  }
+});
+
+/**
+ * Scenario 1: Create a Child (Task) under an existing Parent (Epic).
+ * Consolidates existing + new requirements before creating.
+ */
+app.post("/api/approve/existing-parent", async (req, res) => {
+  const { parent_id, approved_text, proposed_solution } = req.body;
+
+  if (!parent_id) {
+    return res.status(400).json({ error: "No parent_id provided." });
+  }
+  if (!approved_text) {
+    return res.status(400).json({ error: "No approved_text provided." });
+  }
+
+  console.log(`[Server] Creating child requirement under parent #${parent_id}...`);
+
+  try {
+    // 1. Load parent context (existing docs, child count)
+    console.log(`[Server] Loading existing context for parent #${parent_id}...`);
+    const parentItem = await getWorkItemWithRelations(parent_id);
+    const parentFields = parentItem.fields || {};
+    const parentTitle = parentFields["System.Title"] || "Unknown";
+    const relations = parentItem.relations || [];
+
+    // Get existing children to determine version number
+    const children = await getChildWorkItems(parent_id);
+    const newVersion = children.length + 1;
+
+    // 2. Load existing docs from latest child (or parent if no children)
+    let existingReqMd = "";
+    let existingTechMd = "";
+
+    if (children.length > 0) {
+      const sortedChildren = [...children].sort(
+        (a, b) => new Date(b.createdDate) - new Date(a.createdDate)
+      );
+      const latestChild = sortedChildren[0];
+
+      console.log(`[Server] Loading docs from latest child #${latestChild.id}...`);
+      const childItem = await getWorkItemWithRelations(latestChild.id);
+      const childRelations = childItem.relations || [];
+
+      for (const rel of childRelations) {
+        if (rel.rel === "AttachedFile" && rel.attributes) {
+          const name = rel.attributes.name || "";
+          try {
+            if (name.toLowerCase().includes("requirement")) {
+              existingReqMd = await getWorkItemAttachmentContent(rel.url);
+            } else if (name.toLowerCase().includes("technical")) {
+              existingTechMd = await getWorkItemAttachmentContent(rel.url);
+            }
+          } catch (attErr) {
+            console.warn(`[Server] Warning: Failed to download attachment "${name}":`, attErr.message);
+          }
+        }
+      }
+    } else {
+      // Try parent attachments
+      for (const rel of relations) {
+        if (rel.rel === "AttachedFile" && rel.attributes) {
+          const name = rel.attributes.name || "";
+          try {
+            if (name.toLowerCase().includes("requirement")) {
+              existingReqMd = await getWorkItemAttachmentContent(rel.url);
+            } else if (name.toLowerCase().includes("technical")) {
+              existingTechMd = await getWorkItemAttachmentContent(rel.url);
+            }
+          } catch (attErr) {
+            console.warn(`[Server] Warning: Failed to download parent attachment "${name}":`, attErr.message);
+          }
+        }
+      }
+    }
+
+    // 3. Consolidate requirements using AI
+    console.log(`[Server] Consolidating requirements (existing + new)...`);
+    const consolidated = await consolidateRequirements(
+      existingReqMd,
+      existingTechMd,
+      approved_text
+    );
+
+    // 4. Generate transcript summary
+    const transcriptSummary = await generateTranscriptSummary(approved_text);
+
+    // 5. Upload consolidated documents as attachments
+    const attachments = [];
+
+    try {
+      const reqUrl = await uploadAttachment(
+        consolidated.consolidatedReqMd,
+        `Requirement_v${newVersion}.md`
+      );
+      attachments.push({ url: reqUrl, comment: `Consolidated Requirement.md v${newVersion}` });
+    } catch (err) {
+      console.warn("[Server] Warning: Failed to upload consolidated Requirement.md:", err.message);
+    }
+
+    try {
+      const techUrl = await uploadAttachment(
+        consolidated.consolidatedTechMd || proposed_solution || "",
+        `TechnicalDesign_v${newVersion}.md`
+      );
+      attachments.push({ url: techUrl, comment: `Consolidated TechnicalDesign.md v${newVersion}` });
+    } catch (err) {
+      console.warn("[Server] Warning: Failed to upload consolidated TechnicalDesign.md:", err.message);
+    }
+
+    try {
+      const summaryUrl = await uploadAttachment(transcriptSummary, `TranscriptSummary_v${newVersion}.md`);
+      attachments.push({ url: summaryUrl, comment: `Transcript Summary v${newVersion}` });
+    } catch (err) {
+      console.warn("[Server] Warning: Failed to upload transcript summary:", err.message);
+    }
+
+    try {
+      const transcriptUrl = await uploadAttachment(approved_text, `Transcript_v${newVersion}.md`);
+      attachments.push({ url: transcriptUrl, comment: `Original transcript v${newVersion}` });
+    } catch (err) {
+      console.warn("[Server] Warning: Failed to upload transcript:", err.message);
+    }
+
+    // 6. Build child description HTML from consolidated requirements
+    const childDescHtml = await marked.parse(consolidated.consolidatedReqMd || approved_text);
+
+    // 6b. Update Parent Epic's System.Description in Azure DevOps with latest consolidated requirement PRD
+    try {
+      console.log(`[Server] Updating Parent Epic #${parent_id} description in Azure DevOps...`);
+      await updateWorkItemDescription(parseInt(parent_id), childDescHtml);
+      console.log(`[Server] Parent Epic #${parent_id} description successfully updated.`);
+    } catch (updateParentErr) {
+      console.warn(`[Server] Warning: Failed to update Parent Epic #${parent_id} description:`, updateParentErr.message);
+    }
+
+    // 7. Create AI-driven child work item title
+    const titleMatch = approved_text.match(/^#\s+(.+)$/m);
+    const extractedTitle = titleMatch ? titleMatch[1].trim().replace(/^(Task|Feature|PRD|Requirement):\s*/i, "") : "";
+    const aiTaskTitle = consolidated.taskTitle || extractedTitle || `${parentTitle} Requirements`;
+    const childTitle = aiTaskTitle;
+
+    // 8. Create child (Task) linked to parent (Epic)
+    const result = await createChildWorkItem(
+      parseInt(parent_id),
+      childTitle,
+      childDescHtml,
+      attachments,
+      newVersion
+    );
+
+    console.log(`[Server] Child Task #${result.id} created under parent #${parent_id} (v${newVersion})`);
+
+    res.json({
+      work_item_id: result.id,
+      work_item_url: result.url,
+      title: result.title,
+      parent_id: parseInt(parent_id),
+      parent_title: parentTitle,
+      version: newVersion,
+      message: `Child Task #${result.id} created under Epic #${parent_id} (v${newVersion})!`,
+      transcriptSummary,
+      changesSummary: consolidated.changesSummary,
+      consolidatedReqMd: consolidated.consolidatedReqMd,
+      consolidatedTechMd: consolidated.consolidatedTechMd,
+      isChild: true
+    });
+  } catch (error) {
+    console.error(`[Server] Failed to create child requirement under parent #${parent_id}:`, error);
+    res.status(500).json({ error: error.message || "Failed to create child requirement." });
   }
 });
 
@@ -605,6 +951,7 @@ app.get("/api/settings", (req, res) => {
   const devopsPat = process.env.DEVOPS_PAT || "";
   const devopsProject = process.env.DEVOPS_PROJECT || "";
   const devopsWorkItemType = process.env.DEVOPS_WORK_ITEM_TYPE || "Task";
+  const devopsParentWorkItemType = process.env.DEVOPS_PARENT_WORK_ITEM_TYPE || "Epic";
 
   res.json({
     geminiApiKey,
@@ -612,7 +959,8 @@ app.get("/api/settings", (req, res) => {
     devopsOrgUrl,
     devopsPat,
     devopsProject,
-    devopsWorkItemType
+    devopsWorkItemType,
+    devopsParentWorkItemType
   });
 });
 
@@ -623,7 +971,8 @@ app.post("/api/settings", async (req, res) => {
     devopsOrgUrl,
     devopsPat,
     devopsProject,
-    devopsWorkItemType
+    devopsWorkItemType,
+    devopsParentWorkItemType
   } = req.body;
 
   if (!geminiApiKey) {
@@ -665,7 +1014,8 @@ app.post("/api/settings", async (req, res) => {
       DEVOPS_ORG_URL: targetOrgUrl,
       DEVOPS_PAT: devopsPat.trim(),
       DEVOPS_PROJECT: devopsProject.trim(),
-      DEVOPS_WORK_ITEM_TYPE: devopsWorkItemType.trim()
+      DEVOPS_WORK_ITEM_TYPE: devopsWorkItemType.trim(),
+      DEVOPS_PARENT_WORK_ITEM_TYPE: (devopsParentWorkItemType || "Epic").trim()
     });
 
     // 3. Update active environment variables in process.env so the server uses them immediately
@@ -675,6 +1025,7 @@ app.post("/api/settings", async (req, res) => {
     process.env.DEVOPS_PAT = devopsPat.trim();
     process.env.DEVOPS_PROJECT = devopsProject.trim();
     process.env.DEVOPS_WORK_ITEM_TYPE = devopsWorkItemType.trim();
+    process.env.DEVOPS_PARENT_WORK_ITEM_TYPE = (devopsParentWorkItemType || "Epic").trim();
 
     res.json({
       success: true,
