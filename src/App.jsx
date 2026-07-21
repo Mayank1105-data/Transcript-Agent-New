@@ -1353,14 +1353,14 @@ export default function App() {
                         </span>
                       </label>
 
-                      {/* Option 2: Select Existing Epic */}
+                      {/* Option 2: Select Existing DevOps Requirement/Ticket */}
                       <div className="space-y-1.5 pt-1">
                         <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
-                          Or Select Existing Azure DevOps Epic:
+                          Or Select Existing Azure DevOps Requirement / Ticket:
                         </span>
                         <input
                           type="text"
-                          placeholder="Search Epics by title or ID..."
+                          placeholder="Search tickets by ID (e.g. 7625) or title..."
                           value={parentSearchQuery}
                           onChange={(e) => setParentSearchQuery(e.target.value)}
                           className="w-full bg-white text-slate-900 placeholder-slate-400 text-xs font-semibold p-2.5 rounded-lg border border-slate-300 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 focus:outline-none shadow-sm transition-all"
@@ -1370,11 +1370,11 @@ export default function App() {
                           {isLoadingParents ? (
                             <div className="flex items-center justify-center py-5 gap-2 text-xs font-semibold text-indigo-600 bg-indigo-50/50 rounded-lg border border-indigo-100">
                               <span className="w-3.5 h-3.5 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin"></span>
-                              <span>Fetching Azure DevOps Epics...</span>
+                              <span>Fetching Azure DevOps tickets...</span>
                             </div>
                           ) : parentRequirements.length === 0 ? (
                             <div className="text-[11px] text-slate-400 py-2.5 text-center bg-white rounded-lg border border-slate-100">
-                              No DevOps Epics found. (Will create new parent)
+                              No DevOps tickets found matching search.
                             </div>
                           ) : (
                             parentRequirements
@@ -1413,6 +1413,9 @@ export default function App() {
                                       <span className="font-mono text-indigo-700 font-bold shrink-0">#{parent.id}</span>
                                       <span className="truncate font-semibold text-slate-800">{parent.title}</span>
                                     </div>
+                                    <span className="text-[9px] text-purple-700 bg-purple-100/70 px-2 py-0.5 rounded font-mono font-bold shrink-0 ml-2">
+                                      {parent.workItemType || "Epic"}
+                                    </span>
                                   </label>
                                 );
                               })

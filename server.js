@@ -795,7 +795,7 @@ function logWebhook(message, payload = null) {
  */
 app.post("/api/webhook/devops", async (req, res) => {
   const payload = req.body;
-  
+
   if (!payload || !payload.eventType) {
     logWebhook("Received invalid webhook payload (missing eventType or body)");
     return res.status(400).json({ error: "Invalid webhook payload." });
@@ -876,7 +876,7 @@ app.post("/api/webhook/devops", async (req, res) => {
         localDiscussions.push(newComment);
         writeDiscussions(localDiscussions);
         console.log(`[Webhook] Synchronized new comment #${commentId} for Work Item #${workItemId}`);
-        
+
         // Push live comment to frontend
         broadcastSSE("new-comment", newComment);
       } else {
@@ -886,7 +886,7 @@ app.post("/api/webhook/devops", async (req, res) => {
           existingComment.lastUpdated = resource.modifiedDate || new Date().toISOString();
           writeDiscussions(localDiscussions);
           console.log(`[Webhook] Updated comment #${commentId} for Work Item #${workItemId} to: "${cleanText}"`);
-          
+
           // Push updated comment to frontend
           broadcastSSE("updated-comment", existingComment);
         }
@@ -896,9 +896,9 @@ app.post("/api/webhook/devops", async (req, res) => {
     // 2. Process Work Item Detail Updates (title, description, status)
     if (payload.eventType === "workitem.updated" || payload.eventType === "workitem.created") {
       console.log(`[Webhook] Fetching full details for Work Item #${workItemId} to broadcast field changes`);
-      
+
       const workItem = await getWorkItem(workItemId);
-      
+
       const fields = workItem.fields || {};
       const updatedFields = {
         id: parseInt(workItemId),

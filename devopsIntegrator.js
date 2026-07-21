@@ -314,13 +314,11 @@ function getDevOpsConfig() {
  */
 export async function queryParentWorkItems() {
   const { orgUrl, project, authHeader } = getDevOpsConfig();
-  const parentType = (process.env.DEVOPS_PARENT_WORK_ITEM_TYPE || "Epic").trim();
 
   const wiql = {
-    query: `SELECT [System.Id], [System.Title], [System.State], [System.CreatedDate], [System.Description] 
+    query: `SELECT [System.Id], [System.Title], [System.State], [System.CreatedDate], [System.Description], [System.WorkItemType] 
             FROM WorkItems 
             WHERE [System.TeamProject] = '${project}' 
-            AND [System.WorkItemType] = '${parentType}' 
             ORDER BY [System.CreatedDate] DESC`
   };
 
@@ -349,7 +347,7 @@ export async function queryParentWorkItems() {
 
   // Batch fetch work item details (max 200 at a time)
   const batchIds = workItemIds.slice(0, 200);
-  const detailsUrl = `${orgUrl}/${encodeURIComponent(project)}/_apis/wit/workitems?ids=${batchIds.join(",")}&fields=System.Id,System.Title,System.State,System.CreatedDate,System.Description&api-version=7.1`;
+  const detailsUrl = `${orgUrl}/${encodeURIComponent(project)}/_apis/wit/workitems?ids=${batchIds.join(",")}&fields=System.Id,System.Title,System.State,System.CreatedDate,System.Description,System.WorkItemType&api-version=7.1`;
 
   const detailsResponse = await fetch(detailsUrl, {
     method: "GET",
@@ -367,7 +365,8 @@ export async function queryParentWorkItems() {
     title: wi.fields["System.Title"] || "",
     state: wi.fields["System.State"] || "",
     createdDate: wi.fields["System.CreatedDate"] || "",
-    description: wi.fields["System.Description"] || ""
+    description: wi.fields["System.Description"] || "",
+    workItemType: wi.fields["System.WorkItemType"] || "Epic"
   }));
 }
 
